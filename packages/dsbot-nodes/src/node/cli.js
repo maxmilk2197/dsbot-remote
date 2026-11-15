@@ -59,6 +59,14 @@ function parseArgs(argv) {
 }
 
 const stamp = () => new Date().toISOString().slice(11, 19)
+// 群消息按聊天那样打：不带我们自己的时间戳前缀，用消息自己的时间。
+const chat = (line) => {
+  const at = new Date(line?.at ?? Date.now())
+  const clock = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+  const who = String(line?.who ?? '').trim() || '有人'
+  const body = String(line?.text ?? '').replace(/\r/g, '').split('\n').join('\n        ')
+  process.stdout.write(`  ${clock} ${who}：${body}\n`)
+}
 const say = line => process.stdout.write(`${stamp()} ${line}\n`)
 
 function fail(message) {
@@ -177,6 +185,17 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788 }) {
     // 对前面某个请求的回答，这里没有别的等待中的请求，忽略。
     if (frame?.id !== undefined && frame.result !== undefined) return
     if (typeof frame?.method !== 'string') return
+
+    // 群聊镜像：主机把群里的消息推过来，这里像正常群聊那样滚动打印。
+    if (frame.method === 'group.line') {
+      const params = frame.params ?? {}
+      const lines = Array.isArray(params.lines) ? params.lines : []
+      if (params.snapshot === true) {
+        process.stdout.write(`  ── 「${params.roomName ?? '群'}」最近的 ${lines.length} 条 ──\n`)
+      }
+      for (const line of lines) chat(line)
+      return
+    }
 
     if (frame.method === 'node.exec') {
       const action = frame.params?.action

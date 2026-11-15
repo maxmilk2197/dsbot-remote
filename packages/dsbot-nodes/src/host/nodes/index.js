@@ -248,6 +248,10 @@ function installOnce(rt) {
         peer.on('listener-error', error => warn('dsbot-nodes: %s 的帧处理出错：%s', nodeId, error))
         syncRoutes()
         emit(nodeId, 'node.online', { nodeId, name: record?.name ?? nodeId })
+        // 连上就把最近的群消息铺给它：手机那边要"像正常群聊那样"，一进来就得有上下文，
+        // 不能只从下一句开始。放在回执之后异步做，不拖慢握手。
+        void sendRecentLines(peer, record).catch(error =>
+          warn('dsbot-nodes: 给 %s 补群消息失败：%s', nodeId, error?.message ?? error))
         // 上面几个 await 里对面可能就断了。close 早就发完了，我们的监听挂得太晚 ——
         // 不补这一刀，这台机器会被记成永远在线。
         if (peer.closed === true) drop()
@@ -263,6 +267,31 @@ function installOnce(rt) {
     peer.on('close', onClose)
     peer.on('frame', onFrame)
   })
+
+  // 群聊镜像：让远端像正常群聊一样看到消息流。
+  // 只读推送，不写远端任何东西 —— 远端的发言仍然走 node.post 回来。
+  const LINE_TAIL = 15
+
+  const lineOf = record => ({
+    seq: record.seq,
+    who: record.who ?? (record.botId === undefined ? '' : rt.botOf?.(record.botId)?.name ?? ''),
+    botId: record.botId,
+    text: String(record.text ?? ''),
+    at: record.time ?? Date.now(),
+    kind: record.kind,
+  })
+
+  const sendRecentLines = async (peer, record) => {
+    if (typeof rt.groupLinesAfter !== 'function') return
+    for (const groupId of record.groups ?? []) {
+      const room = rt.roomOf?.(groupId)
+      if (room === undefined) continue
+      const all = await rt.groupLinesAfter(groupId, 0).catch(() => [])
+      const tail = (all ?? []).slice(-LINE_TAIL).map(lineOf).filter(line => line.text !== '')
+      if (tail.length === 0) continue
+      peer.send({ method: 'group.line', params: { roomId: room.id, roomName: room.name, lines: tail, snapshot: true } })
+    }
+  }
 
   const connectNode = async ({ url, token, timeoutMs = HELLO_TIMEOUT_MS + 2_000, helloTimeoutMs = HELLO_TIMEOUT_MS } = {}) => {
     if (typeof url !== 'string' || url === '') throw new LlmError('缺 url', 'node/bad-params')
@@ -462,6 +491,26 @@ ${links.join(' ')}`
     }
   }
   void sweepOrphans().catch(error => warn('dsbot-nodes: 扫孤儿成员失败：%s', error?.message ?? error))
+
+  // 群里有动静就推给绑在它上面的远端。snapshot 之后走的都是这条。
+  if (typeof rt.onRoomLine === 'function' && typeof ctx.effect === 'function') {
+    ctx.effect(() => rt.onRoomLine((room, record) => {
+      const line = lineOf(record)
+      if (line.text === '') return
+      for (const [nodeId, peer] of peers) {
+        const node = store.node(nodeId)
+        if (node === undefined || !(node.groups ?? []).includes(room.id)) continue
+        if (peer.closed === true) continue
+        // 它自己刚说的话不用推回去（它当场就打印过了），免得每条都出现两遍。
+        if (line.botId !== undefined && line.botId === node.botId) continue
+        try {
+          peer.send({ method: 'group.line', params: { roomId: room.id, roomName: room.name, lines: [line] } })
+        } catch (error) {
+          warn('dsbot-nodes: 推群消息给 %s 失败：%s', nodeId, error?.message ?? error)
+        }
+      }
+    }))
+  }
 
   // 反过来的那一半：这台机器也可以"加入别人的群"。
   const joiner = createJoiner({ home: rt.home, warn: message => warn(message) })
