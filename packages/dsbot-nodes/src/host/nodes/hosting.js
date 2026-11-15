@@ -5,7 +5,7 @@
 // 通关口令（码本身当 token）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
-import { HOST_VIRTUAL_IP, elevateEasyTier, findEasyTier, hasLocalIp, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
+import { elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
 
 export const DEFAULT_PORT = 7777
 
@@ -65,16 +65,16 @@ export function createHosting({
     current = { code: chosen, port: server.port, server, discovery }
     warn(`等你来连：配对码 ${chosen}，端口 ${server.port}`)
     // 虚拟网放在后面异步起：起不来也不能耽误局域网这条道。
-    void startNetwork(chosen)
+    void startNetwork(chosen, server.port)
     return status()
   }
 
   // 进虚拟网。成了就多一条跨网的路，不成就只剩局域网 —— 都是能用的状态。
-  async function startNetwork(code) {
+  async function startNetwork(code, port) {
     if (network === false || network === 'off') return
     if (networkTried === code) return
     networkTried = code
-    virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null }
+    virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null, zeroTun: true, lan: lan ?? null, subnets }
 
     const found = await findEasyTier().catch(() => undefined)
     if (found === undefined) {
@@ -83,10 +83,24 @@ export function createHosting({
       return
     }
 
+    // 零权限模式（默认走这条）：不建虚拟网卡，所以不需要管理员权限。
+    // 主机把自己所在的局域网"借"给虚拟网（子网代理），远端连那个地址就行。
+    // 代价是主机没有虚拟网卡 —— 判断"通没通"不能再看网卡，得看进程状态。
+    const lan = lanAddress()
+    const subnets = localSubnets()
     let job
     try {
-      // 固定地址：远端不必猜主机 DHCP 到了哪，永远连 HOST_VIRTUAL_IP。
-      job = startEasyTier({ core: found.core, code, ipv4: HOST_VIRTUAL_IP })
+      job = startEasyTier({
+        core: found.core,
+        code,
+        ipv4: hostVirtualIp(code),
+        noTun: true,
+        // 只代理第一张真实网卡：全代理会把虚拟网自己绕进去，而且多网卡时路由会打架。
+        subnetProxy: subnets[0],
+        // 局域网地址编进 hostname，远端从 peer 列表里读出来就知道往哪打。
+        // 地址和端口都编进名字：远端从 peer 列表读到就知道该往哪打。
+        hostname: lan === undefined ? undefined : hostTag(lan, port),
+      })
     } catch (error) {
       virtual = { ...virtual, error: `起不来：${error?.message ?? error}` }
       warn('dsbot-nodes: EasyTier %s', virtual.error)
@@ -101,9 +115,11 @@ export function createHosting({
         try { job.stop() } catch {}
         return
       }
-      virtual = { on: true, ipv4: ready?.ipv4 ?? null, name: virtual.name, error: null }
-      warn('dsbot-nodes: 虚拟网已就绪%s —— 对面用同一个码、加 --network 就能跨网连',
-        virtual.ipv4 === null ? '' : `（${virtual.ipv4}）`)
+      virtual = { ...virtual, on: true, ipv4: ready?.ipv4 ?? null, error: null }
+      // 零权限模式下没有网卡可看，所以把"对面该连哪"直接写清楚。
+      warn('dsbot-nodes: 跨网已就绪%s —— 对面输同一个配对码就行%s',
+        virtual.lan === null ? '' : `，它要连的是 ${virtual.lan}`,
+        virtual.subnetProxy === undefined ? '' : `（子网代理 ${virtual.subnetProxy}）`)
     } catch (error) {
       try { job.stop() } catch {}
       vnet = null
@@ -137,7 +153,7 @@ export function createHosting({
   async function elevate() {
     if (current === null) return { ok: false, error: '还没有开始监听，先有个配对码' }
     const code = current.code
-    const ip = HOST_VIRTUAL_IP.split('/')[0]
+    const ip = hostVirtualIp(code).split('/')[0]
 
     // 普通权限那个实例已经证明建不出网卡了，先收掉，免得两个抢 TUN 名。
     try { vnet?.stop() } catch {}
@@ -190,13 +206,18 @@ export function createHosting({
       // 反过来进程一停网卡就没了，这里会立刻如实变回 false。
       network: {
         ...virtual,
-        on: virtual.on || hasLocalIp(virtual.ipv4 ?? HOST_VIRTUAL_IP.split('/')[0]),
+        // TUN 模式看网卡（最可信）；零权限模式没有网卡，只能看进程还活着没。
+        on: virtual.zeroTun === true
+          ? virtual.on && vnet !== null && vnet.child?.exitCode === null
+          : (virtual.on || hasLocalIp(virtual.ipv4 ?? hostVirtualIp(current?.code ?? '').split('/')[0])),
         name: virtual.name ?? (current === null ? null : pairCredentials(current.code).networkName),
         // 只要还没通就给按钮 —— 之前只在"缺管理员权限"时给，结果提权一失败
         // （error 变成别的话）按钮就消失了，用户连重试的机会都没有。
         // 唯一不给的情况是压根没找到 EasyTier，那提权也救不了。
-        needsElevation: !(virtual.on || hasLocalIp(virtual.ipv4 ?? HOST_VIRTUAL_IP.split('/')[0]))
-          && !/没找到 EasyTier/.test(virtual.error ?? ''),
+        needsElevation: virtual.zeroTun === true
+          ? false   // 零权限就能用，不需要提权
+          : (!(virtual.on || hasLocalIp(virtual.ipv4 ?? hostVirtualIp(current?.code ?? '').split('/')[0]))
+            && !/没找到 EasyTier/.test(virtual.error ?? '')),
       },
       // 已经在这个端口上的是哪台机器（给界面直接看）
       online: store.list().filter(node => node.status === 'online').map(node => ({

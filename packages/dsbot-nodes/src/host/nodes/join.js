@@ -7,8 +7,20 @@ import { findHost } from '@dsbot/node-protocol/discovery'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { parseAgentCommand } from '../../node/agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'
-import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from '../../node/easytier.js'
+import net from 'node:net'
+import { addPortForward, findEasyTier, pairCredentials, startEasyTier, waitForHostPeer } from '../../node/easytier.js'
 import { createMirror } from './mirror.js'
+
+// 端口转发要在本机开一个真实端口，挑一个没人用的。
+const freePort = () => new Promise((resolve, reject) => {
+  const server = net.createServer()
+  server.unref()
+  server.on('error', reject)
+  server.listen(0, '127.0.0.1', () => {
+    const { port } = server.address()
+    server.close(() => resolve(port))
+  })
+})
 
 export function createJoiner({ home, rt, warn = () => {} }) {
   let peer = null
@@ -53,11 +65,27 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         const core = await findEasyTier().catch(() => undefined)
         if (core === undefined) throw broadcastFailed
         info = { ...info, host: `虚拟网 ${pairCredentials(clean).networkName}` }
-        vnet = startEasyTier({ core: core.core, code: clean, onLog: line => warn(`  [et] ${line}`) })
+        // 零权限：不建虚拟网卡（那要管理员），所以本机程序连不到虚拟网里的地址。
+        // 靠端口转发把隧道里的目标映射到本机一个真实端口。
+        vnet = startEasyTier({
+          core: core.core, code: clean, noTun: true,
+          onLog: line => warn(`  [et] ${line}`),
+        })
         const ready = await vnet.ready
-        const target = HOST_VIRTUAL_IP.split('/')[0]
-        found = { host: target, port: 7777, name: `虚拟网主机（本机 ${ready?.ipv4 ?? '?'}）` }
-        warn(`虚拟网就绪（${ready?.ipv4 ?? '?'}）→ 连 ${target}:7777`)
+        // 主机把"我在这张局域网的哪个地址、哪个端口"写在自己的 hostname 上，
+        // 进了虚拟网就能从 peer 列表读到 —— 两端谁都不需要预先知道对方地址。
+        const target = await waitForHostPeer({ core: core.core, onLog: line => warn(`  ${line}`) })
+        if (target === undefined) {
+          throw new Error('进了虚拟网，但没等到主机 —— 主机的跨网可能没开，或者配对码不一样')
+        }
+        const hostPort = target.port ?? 7777
+        const localPort = await freePort()
+        const forwarded = await addPortForward({
+          core: core.core, bind: `127.0.0.1:${localPort}`, dst: `${target.address}:${hostPort}`,
+        })
+        if (forwarded.ok !== true) throw new Error(`端口转发没加上：${forwarded.error}`)
+        found = { host: '127.0.0.1', port: localPort, name: `虚拟网 → ${target.address}:${hostPort}` }
+        warn(`虚拟网就绪（${ready?.ipv4 ?? '?'}）→ 127.0.0.1:${localPort} 转 ${target.address}:${hostPort}`)
       }
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })

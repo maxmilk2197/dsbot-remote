@@ -13,7 +13,7 @@ import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { connectTcp, listenTcp } from '@dsbot/node-protocol/tcp'
 import { findHost, listenDiscovery } from '@dsbot/node-protocol/discovery'
-import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from './easytier.js'
+import { findEasyTier, hostVirtualIp, pairCredentials, startEasyTier } from './easytier.js'
 import { ALLOWED_ACTIONS, execute } from './exec.js'
 import { parseAgentCommand, runAgent } from './agent.js'
 
@@ -336,7 +336,7 @@ async function runPair(args) {
     say(`加入虚拟网 ${pairCredentials(code).networkName} …`)
     network = startEasyTier({ core: found.core, code, onLog: line => say(`  [et] ${line}`) })
     const ready = await network.ready
-    say(`虚拟网已就绪${ready.ipv4 ? `（${ready.ipv4}）` : ''}，主机在 ${HOST_VIRTUAL_IP.split('/')[0]}`)
+    say(`虚拟网已就绪${ready.ipv4 ? `（${ready.ipv4}）` : ''}，主机在 ${hostVirtualIp(code).split('/')[0]}`)
     return network
   }
 
@@ -358,7 +358,7 @@ async function runPair(args) {
         // 与其让人回去翻文档加参数，不如直接进虚拟网按主机的固定地址连。
         say('局域网里没找到，改走跨网…')
         await enterNetwork()
-        const target = HOST_VIRTUAL_IP.split('/')[0]
+        const target = hostVirtualIp(code).split('/')[0]
         host = { host: target, port: 7777, name: '虚拟网主机' }
         say(`走虚拟网找 ${target}:7777`)
       }

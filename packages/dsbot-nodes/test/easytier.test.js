@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   DEFAULT_SERVERS,
-  HOST_VIRTUAL_IP,
+  hostVirtualIp,
   buildElevateScript,
   pairCredentials,
   writeElevateScript,
@@ -30,7 +30,7 @@ test('提权命令：网络名和密钥来自配对码，两端必须一致', ()
 
 test('提权命令：主机占固定地址，远端才连得上', () => {
   const script = buildElevateScript(FLAGS)
-  assert.ok(script.includes(`'${HOST_VIRTUAL_IP}'`), '固定 IP 要在 -i 后面')
+  assert.ok(script.includes(`'${hostVirtualIp('TC7ECK')}'`), '固定 IP 要在 -i 后面')
   assert.ok(script.includes("'-i'"), '要用 -i 而不是 -d，DHCP 给不出可预测的地址')
 })
 
@@ -42,10 +42,12 @@ test('提权命令：会合点必须带上，否则两端永远互相看不见',
   assert.ok(DEFAULT_SERVERS.length > 0, '会合点列表不能是空的')
 })
 
-test('提权命令：会合点写 IP 不写域名', () => {
-  // 域名会被本地代理的 fake-ip 解析成 198.18.x，看着"连上了"其实没出本机。
+test('会合点：列表不能空，每个都得是合法的 peer 地址', () => {
+  // 官方 public.easytier.cn 已于 2026-02 停服（NXDOMAIN），所以这里必须有
+  // 真实可用的社区节点 —— 空数组等于谁都不连，跨网永远不可能通。
+  assert.ok(DEFAULT_SERVERS.length > 0, '会合点列表不能为空')
   for (const server of DEFAULT_SERVERS) {
-    assert.match(server, /^tcp:\/\/\d+\.\d+\.\d+\.\d+:\d+$/, `${server} 应该是 IP`)
+    assert.match(server, /^(tcp|udp|ws|wss):\/\/[^\s]+:\d+$/, `${server} 格式不对`)
   }
 })
 
@@ -79,7 +81,7 @@ test('兜底脚本：带齐配对码、固定 IP 和会合点', async () => {
   const { networkName, networkSecret } = pairCredentials('TC7ECK')
   assert.ok(text.includes(networkName), '网络名要在')
   assert.ok(text.includes(networkSecret), '密钥要在')
-  assert.ok(text.includes(HOST_VIRTUAL_IP), '固定 IP 要在')
+  assert.ok(text.includes(hostVirtualIp('TC7ECK')), '固定 IP 要在')
   for (const server of DEFAULT_SERVERS) assert.ok(text.includes(server), `${server} 要在`)
   assert.ok(text.includes('C://tools//easytier-core.exe'), '二进制路径要在')
 })
@@ -88,4 +90,56 @@ test('兜底脚本：跑完不立刻关窗，否则用户看不到报错', async
   const file = await writeElevateScript({ core: 'C://tools//easytier-core.exe', code: 'TC7ECK' })
   const text = await readFile(file, 'utf8')
   assert.match(text, /pause/i, '要有 pause，不然出错也是一闪而过')
+})
+
+// ---- 零权限模式 ----
+// 建虚拟网卡要管理员，那条路在 DSH 里走不通；--no-tun 不建网卡，两端都能零权限。
+// 主机靠子网代理把自己所在的局域网借出去，远端靠端口转发连进来。
+
+test('主机 hostname 里编着局域网地址，远端能解析回来', async () => {
+  const { hostTag, parseHostTag } = await import('../src/node/easytier.js')
+  assert.equal(hostTag('192.168.3.248'), 'dsbot-h-192-168-3-248')
+  assert.deepEqual(parseHostTag('dsbot-h-192-168-3-248'), { address: '192.168.3.248', port: undefined })
+  // 带端口的写法：5 段数字，靠段数和纯地址区分开
+  assert.equal(hostTag('192.168.3.248', 7777), 'dsbot-h-192-168-3-248-7777')
+  assert.deepEqual(parseHostTag('dsbot-h-192-168-3-248-7777'), { address: '192.168.3.248', port: 7777 })
+  // 别的节点名不能被误认成主机
+  assert.equal(parseHostTag('nekopc'), undefined)
+  assert.equal(parseHostTag('PublicServer_x'), undefined)
+  assert.equal(parseHostTag('dsbot-h-1-2-3'), undefined, '段数不够不算')
+})
+
+test('本机网段识别：跳过隧道和虚拟网自己', async () => {
+  const { localSubnets, lanAddress } = await import('../src/node/easytier.js')
+  const subnets = localSubnets()
+  assert.ok(Array.isArray(subnets))
+  for (const cidr of subnets) {
+    assert.match(cidr, /^\d+\.\d+\.\d+\.\d+\/\d+$/, `${cidr} 不是 CIDR`)
+    assert.ok(!cidr.startsWith('10.126.126.'), '虚拟网自己不该被代理出去')
+  }
+  assert.ok(lanAddress() === undefined || /^\d+\.\d+\.\d+\.\d+$/.test(lanAddress()))
+})
+
+// 虚拟网段不能写死：用户自己的局域网万一就是那一段，路由会打架；
+// 同一台设备连两个不同主机时，两边都塞同一个 .1 也会撞。
+test('虚拟网段按配对码派生：同码同段，异码异段', async () => {
+  const { virtualCidr, hostVirtualIp } = await import('../src/node/easytier.js')
+  assert.equal(virtualCidr('TC7ECK'), virtualCidr('TC7ECK'), '同一个码必须算出同一段')
+  assert.notEqual(virtualCidr('TC7ECK'), virtualCidr('ABC234'), '不同码不能撞')
+  // 避开家庭路由器爱用的 10.0 / 10.1 / 10.10 段
+  for (const code of ['TC7ECK', 'ABC234', 'N5JRP2', 'ZZZZZZ']) {
+    const second = Number(virtualCidr(code).split('.')[1])
+    assert.ok(second >= 30, `${code} 落进了 10.${second}.x，和家用网段太近`)
+  }
+  assert.equal(hostVirtualIp('TC7ECK'), virtualCidr('TC7ECK').replace('.0/24', '.1/24'))
+})
+
+// 局域网段必须实时从网卡读，不能写死某一台机器的网段
+test('局域网段取的是本机真实网卡，不是写死的值', async () => {
+  const { localSubnets } = await import('../src/node/easytier.js')
+  const subnets = localSubnets()
+  assert.ok(Array.isArray(subnets), '要返回数组（没网卡时可能是空）')
+  for (const cidr of subnets) {
+    assert.match(cidr, /^\d+\.\d+\.\d+\.0\/\d+$/, `${cidr} 必须是网络地址，主机位得是 0`)
+  }
 })

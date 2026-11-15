@@ -31,20 +31,38 @@ const LEGACY_VENDORED_DIR = join(
   import.meta.dirname, '..', '..', '..', 'dsbot-remote', 'vendor', 'easytier', VENDOR_PLATFORM,
 )
 // 跨网必须有个"会合点"：两端不在同一张局域网时，得先在一个公共节点上互相发现。
-// 不填 -p 的话 EasyTier 谁都不连，两台机器各自建好网卡却永远看不见对方。
 //
 // 官方那个 public.easytier.cn 已经在 2026 年 2 月停服（域名现在是 NXDOMAIN），
-// 网上大量教程还写着它 —— 照抄就是连不上。这里用社区仍在跑的共享节点，并且
-// 一律写 IP 不写域名：域名会被本地代理的 fake-ip 解析成 198.18.x，看着"连上了"
-// 其实根本没出本机。
+// 网上大量教程还写着它 —— 照抄就是连不上。下面这些是社区仍在跑的共享节点，
+// 取自监控站 https://easytier.gd.nkbpal.cn/（会持续更新，失效了去那里换）。
+//
+// 一律写域名或 IP，不靠本地 DNS 猜：EasyTier 会同时连多个，哪个通用哪个。
 export const DEFAULT_SERVERS = [
-  'tcp://39.108.52.138:11010',
-  'tcp://8.148.29.206:11010',
+  'tcp://225284.xyz:11010',        // 深圳·专线，实测握手成功
+  'tcp://et.sumight.top:11010',    // 上海 BGP
+  'tcp://et.qdckw.top:11010',      // 低延迟
+  'udp://us01.225284.xyz:11010',   // 美国，作备份
 ]
-export const VIRTUAL_CIDR = '10.126.126.0/24'
-// 主机在这个网里占的固定地址。远端走 DHCP 随便拿一个，但连的永远是 .1 ——
-// 否则远端根本不知道该往哪打（虚拟网里没有 UDP 广播，找不到主机）。
-export const HOST_VIRTUAL_IP = '10.126.126.1/24'
+
+/**
+ * 虚拟网段按配对码派生，不写死。
+ *
+ * 写死 10.126.126.0/24 有两个麻烦：用户自己的局域网万一正好是这一段，路由会打架；
+ * 同一台设备连两个不同主机时，两边都塞 10.126.126.1，也会撞。
+ * 用配对码算出来就自然错开了 —— 同一个码两端算出同一段，不同码互不干扰。
+ * 避开 10.0 / 10.1 / 10.10 这些家用路由器爱用的段。
+ */
+export function virtualCidr(code) {
+  const digest = createHash('sha256').update(`vnet:${String(code ?? '').trim().toUpperCase()}`).digest()
+  const second = 30 + (digest[0] % 90)      // 10.30.x.x ~ 10.119.x.x
+  const third = 1 + (digest[1] % 250)       // 避开 .0 和 .255
+  return `10.${second}.${third}.0/24`
+}
+
+/** 主机在这个网段里占的固定地址（.1），远端走 DHCP 拿别的。 */
+export function hostVirtualIp(code) {
+  return `${virtualCidr(code).split('/')[0].replace(/\.0$/, '.1')}/24`
+}
 
 // 地址是否真的挂在本机某块网卡上。这是"网卡建出来了"唯一可信的证据 ——
 // EasyTier 会把自己的配置回显到日志，拿日志判断等于自己骗自己。
@@ -55,6 +73,153 @@ export function hasLocalIp(address) {
     }
   }
   return false
+}
+
+const maskBits = (mask) => {
+  const parts = String(mask ?? '').split('.').map(Number)
+  if (parts.length !== 4 || parts.some(each => !Number.isInteger(each))) return 24
+  let bits = 0
+  for (const part of parts) {
+    // 逐位数字符串比较省事：255 → 8 个 1，0 → 0 个 1。
+    bits += part.toString(2).split('').filter(each => each === '1').length
+  }
+  return bits
+}
+
+// 192.168.3.248 + /24 → 192.168.3.0
+// 子网代理要的是网络地址，直接把主机地址丢进去 EasyTier 会拒：
+// "failed to parse proxy network: host part of address was not zero"。
+export const toNetworkAddress = (address, bits) => {
+  const parts = String(address).split('.').map(Number)
+  if (parts.length !== 4 || parts.some(each => !Number.isInteger(each))) return address
+  const value = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0
+  const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0
+  const net = (value & mask) >>> 0
+  return [(net >>> 24) & 255, (net >>> 16) & 255, (net >>> 8) & 255, net & 255].join('.')
+}
+
+/**
+ * 本机所在的局域网段（CIDR）。主机用它们做子网代理，把"我这张网上的服务"
+ * 借给虚拟网 —— 这样远端不用知道主机装了什么，只要连主机的局域网地址就行。
+ *
+ * 虚拟网卡、回环、Tailscale 这类都不算：它们是隧道，代理出去只会绕圈。
+ */
+export function localSubnets() {
+  const out = []
+  const skip = /^(lo|vEthernet|VirtualBox|VMware|Hyper-V|Tailscale|Meta|docker|br-|veth|tun|tap|et_)/i
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    if (skip.test(name)) continue
+    for (const entry of list ?? []) {
+      if (entry.family !== 'IPv4' || entry.internal === true) continue
+      if (entry.address.startsWith('169.254.')) continue   // 自动私有地址，没意义
+      if (entry.address.startsWith('10.126.126.')) continue // 就是这个虚拟网本身
+      const bits = maskBits(entry.netmask)
+      out.push(`${toNetworkAddress(entry.address, bits)}/${bits}`)
+    }
+  }
+  return out
+}
+
+/**
+ * 本机在局域网里的地址（不是虚拟网地址）。主机把它编进 EasyTier 的 hostname，
+ * 远端从 peer 列表里读出来就知道该往哪连 —— 这样两端都不需要预先知道对方地址。
+ */
+export function lanAddress() {
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    if (/^(lo|vEthernet|VirtualBox|VMware|Hyper-V|Tailscale|Meta|docker)/i.test(name)) continue
+    for (const entry of list ?? []) {
+      if (entry.family !== 'IPv4' || entry.internal === true) continue
+      if (entry.address.startsWith('169.254.') || entry.address.startsWith('10.126.126.')) continue
+      return entry.address
+    }
+  }
+  return undefined
+}
+
+/**
+ * 主机的 hostname 里编着自己的局域网地址，远端从 peer 列表把它读出来。
+ *
+ * 为什么要绕这一圈：跨网时远端连不上主机，也就没法"先握手再问地址"。
+ * 但两端都进了虚拟网之后，peer 列表是对彼此可见的 —— 主机把地址写在自己名字上，
+ * 远端读一下就知道该往哪打。不需要任何一方有公网地址，也不需要中转服务器。
+ */
+export const hostTag = (address, port) =>
+  `dsbot-h-${String(address).replace(/\./g, '-')}${Number(port) > 0 ? `-${Number(port)}` : ''}`
+
+export function parseHostTag(hostname) {
+  const token = String(hostname ?? '').trim()
+  // 4 段数字 = 只有地址；5 段 = 地址 + 端口。段落数就能区分，不会混淆。
+  const four = /^dsbot-h-(\d+)-(\d+)-(\d+)-(\d+)$/.exec(token)
+  if (four !== null) return { address: `${four[1]}.${four[2]}.${four[3]}.${four[4]}`, port: undefined }
+  const five = /^dsbot-h-(\d+)-(\d+)-(\d+)-(\d+)-(\d+)$/.exec(token)
+  if (five !== null) {
+    return { address: `${five[1]}.${five[2]}.${five[3]}.${five[4]}`, port: Number(five[5]) }
+  }
+  return undefined
+}
+
+/**
+ * 轮询 peer 列表，等主机的地址出现。虚拟网刚起来时列表是空的，所以要等。
+ * @returns {Promise<string|undefined>} 主机的局域网地址，比如 192.168.3.248
+ */
+export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1_500, onLog }) {
+  const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const output = await new Promise((resolve) => {
+      let text = ''
+      const child = spawn(cli, ['peer'], { windowsHide: true, cwd: dirname(core) })
+      child.stdout?.on('data', (chunk) => { text += chunk.toString('utf8') })
+      child.stderr?.on('data', (chunk) => { text += chunk.toString('utf8') })
+      child.on('error', () => resolve(''))
+      child.on('exit', () => resolve(text))
+    })
+    // hostname 在表格的某一列里，直接全文找标记就够了。
+    for (const token of output.split(/\s+/)) {
+      const host = parseHostTag(token)
+      if (host !== undefined) {
+        onLog?.(`找到主机：${host.address}${host.port === undefined ? '' : `:${host.port}`}`)
+        return host
+      }
+    }
+    await new Promise(done => setTimeout(done, intervalMs))
+  }
+  return undefined
+}
+
+/**
+ * 给正在跑的 EasyTier 加一条端口转发规则（远端用）。
+ *
+ * 远端零权限模式下没有虚拟网卡，本机程序连不到虚拟网里的任何地址，所以要在
+ * 本机开一个真实端口，由 EasyTier 把它转进隧道。这条规则必须等知道主机地址
+ * 之后才能加，而主机地址要进了虚拟网才看得到 —— 所以塞不进启动参数，
+ * 只能用管理接口追加。
+ */
+export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeoutMs = 15_000 }) {
+  const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
+  const run = () => new Promise((resolve) => {
+    let err = ''
+    const child = spawn(cli, ['port-forward', 'add', protocol, bind, dst], {
+      windowsHide: true, cwd: dirname(core),
+    })
+    child.stdout?.on('data', () => {})
+    child.stderr?.on('data', (chunk) => { err += chunk.toString('utf8') })
+    child.on('error', (error) => resolve({ ok: false, error: error.message }))
+    child.on('exit', (code_) => resolve({
+      ok: code_ === 0,
+      error: code_ === 0 ? undefined : (err.trim().split('\n').pop() || `退出码 ${code_}`),
+    }))
+  })
+
+  // 实例刚起来时管理接口可能还没就绪，重试几次再放弃。
+  const deadline = Date.now() + timeoutMs
+  let last = { ok: false, error: '没跑起来' }
+  while (Date.now() < deadline) {
+    last = await run()
+    if (last.ok) return last
+    await new Promise(done => setTimeout(done, 1_000))
+  }
+  return last
 }
 
 const isWindows = process.platform === 'win32'
@@ -124,6 +289,11 @@ export function startEasyTier({
   // 留空则走 DHCP（远端用）。
   ipv4,
   hostname,
+  // 零权限模式：不建虚拟网卡。虚拟 IP 照样分配，但本机没有对应的网卡，
+  // 本机程序不能直接访问那个地址 —— 主机靠子网代理、远端靠端口转发。
+  noTun = false,
+  // 把自己所在的局域网"借"给虚拟网（子网代理）。主机用这个让远端访问到它。
+  subnetProxy,
 }) {
   const { networkName, networkSecret } = pairCredentials(code)
   const args = [
@@ -132,6 +302,8 @@ export function startEasyTier({
     '--network-name', networkName,
     '--network-secret', networkSecret,
     ...(typeof hostname === 'string' && hostname !== '' ? ['--hostname', hostname] : []),
+    ...(noTun ? ['--no-tun'] : []),
+    ...(typeof subnetProxy === 'string' && subnetProxy !== '' ? ['-n', subnetProxy] : []),
     ...(servers.length ? servers.flatMap((server) => ['-p', server]) : []),
     ...extraArgs,
   ]
@@ -198,7 +370,20 @@ export function startEasyTier({
     // 实测就是这么骗过自己的。现在只认两条硬证据：
     //   1. 本机网卡列表里真的出现了这个地址；
     //   2. 出现的是失败日志 —— 立刻报错，别等 60 秒。
-    if (expected !== null) {
+    if (noTun) {
+      // 零权限模式本来就不建网卡，所以"地址有没有挂在网卡上"这个判据在这里失效。
+      // 改看两件事：进程没崩、日志里出现了 listener（说明它真的开始工作了）。
+      // 不用等 peer 连上 —— 会合点可能在重试，那不该算启动失败。
+      const alive = setInterval(() => {
+        if (settled) return
+        if (/new listener added/i.test(output)) {
+          clearInterval(alive)
+          done(expected)
+        }
+      }, 300)
+      alive.unref?.()
+      setTimeout(() => { if (!settled) { clearInterval(alive); done(expected) } }, 8_000)
+    } else if (expected !== null) {
       probe = setInterval(() => {
         if (hasLocalIp(expected)) done(expected)
       }, 400)
@@ -241,7 +426,7 @@ export function startEasyTier({
 export function buildElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
   const { networkName, networkSecret } = pairCredentials(code)
   const args = [
-    '-i', HOST_VIRTUAL_IP,
+    '-i', hostVirtualIp(code),
     '--network-name', networkName,
     '--network-secret', networkSecret,
     ...servers.flatMap(server => ['-p', server]),
@@ -265,7 +450,7 @@ export function buildElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
 export async function writeElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
   const { networkName, networkSecret } = pairCredentials(code)
   const args = [
-    '-i', HOST_VIRTUAL_IP,
+    '-i', hostVirtualIp(code),
     '--network-name', networkName,
     '--network-secret', networkSecret,
     ...servers.flatMap(server => ['-p', server]),
