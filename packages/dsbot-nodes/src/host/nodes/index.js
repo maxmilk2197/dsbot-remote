@@ -513,7 +513,7 @@ ${links.join(' ')}`
   }
 
   // 反过来的那一半：这台机器也可以"加入别人的群"。
-  const joiner = createJoiner({ home: rt.home, warn: message => warn(message) })
+  const joiner = createJoiner({ home: rt.home, rt, warn: message => warn(message) })
 
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => {

@@ -121,7 +121,7 @@ async function collectAttachments(text) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788 }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGroupLine }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
   peer.send({ id: 'hello', method: 'node.hello', params: { name, deviceId, caps } })
@@ -194,6 +194,10 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788 }) {
         process.stdout.write(`  ── 「${params.roomName ?? '群'}」最近的 ${lines.length} 条 ──\n`)
       }
       for (const line of lines) chat(line)
+      // 镜像（手机上真的建一个同名群）走这个回调；CLI 自己用就不传。
+      if (typeof onGroupLine === 'function') {
+        try { onGroupLine(params, lines) } catch (error) { say(`镜像失败：${error.message}`) }
+      }
       return
     }
 
