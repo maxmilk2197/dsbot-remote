@@ -55,7 +55,11 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState(node.name)
       React.useEffect(() => { setDraft(node.name) }, [node.name])
 
-      const joined = node.groups || []
+      // 后端可能还是旧版：node.groups 那时是 ['session-xxx']，不是 [{id,name}]。
+      // 两种都认，界面才不会出现"在：undefined"。
+      const joined = (node.groups || []).map(group => (
+        typeof group === 'string' ? { id: group, name: group } : group
+      ))
       const save = async () => {
         const name = String(draft || '').trim()
         setEditing(false)
