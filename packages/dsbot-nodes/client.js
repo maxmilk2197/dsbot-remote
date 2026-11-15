@@ -53,7 +53,16 @@ window.__ModuleLoader__.load({
     function NodeCard({ node, groups, busy, act, onRename }) {
       const [editing, setEditing] = React.useState(false)
       const [draft, setDraft] = React.useState(node.name)
+      // 下拉必须是受控的，值不能写死成 ''：那样每次选择都被 React 按回去，
+      // 看着就是"点了没反应"。选中的值先显示出来，绑完再归位。
+      const [picked, setPicked] = React.useState('')
+      const [notice, setNotice] = React.useState('')
       React.useEffect(() => { setDraft(node.name) }, [node.name])
+      React.useEffect(() => {
+        if (notice === '') return undefined
+        const timer = setTimeout(() => setNotice(''), 3000)
+        return () => clearTimeout(timer)
+      }, [notice])
 
       // 后端可能还是旧版：node.groups 那时是 ['session-xxx']，不是 [{id,name}]。
       // 两种都认，界面才不会出现"在：undefined"。
@@ -98,13 +107,15 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           h('select', {
-            // value 恒为 ''：这样点开永远能看到全部群。设成当前群 id 的话，群一多
-            // 或者群被删了，浏览器会退回占位项，看着就像"这个下拉是空的"。
-            value: '',
-            onChange: (event) => {
+            value: picked,
+            onChange: async (event) => {
               const groupId = event.target.value
               if (groupId === '') return
-              act('bind', () => jpost('/bind', { node: node.id, group: groupId }))
+              const group = groups.find(each => each.id === groupId)
+              setPicked(groupId)   // 先让选择停在用户点的那一项上
+              const ok = await act('bind', () => jpost('/bind', { node: node.id, group: groupId }))
+              setPicked('')
+              if (ok) setNotice('已加入「' + (group?.name ?? groupId) + '」')
             },
             style: { padding: '5px 8px', borderRadius: 8, fontSize: 12.5, maxWidth: 260 },
           },
@@ -136,6 +147,9 @@ window.__ModuleLoader__.load({
             },
           }, busy === 'forget:' + node.id ? '移除中…' : '移除这台机器'),
         ),
+        notice === ''
+          ? null
+          : h('div', { style: { fontSize: 12, color: '#39b54a', marginTop: 6 } }, notice),
       ], node.id)
     }
 
@@ -171,8 +185,10 @@ window.__ModuleLoader__.load({
         try {
           await fn()
           await refresh()
+          return true
         } catch (e) {
           setError(e.message)
+          return false
         } finally {
           setBusy('')
         }
