@@ -5,9 +5,9 @@
 //
 // 跑起来之后它就是一个"节点"：报身份、接主机发来的 node.exec、把结果发回去。
 // 群里的发言不在这里 —— 那是主机拿这一轮 turn 的输出写进去的，见 README。
-import { randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { homedir, hostname } from 'node:os'
+import { arch, homedir, hostname, platform, userInfo } from 'node:os'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { connectTcp, listenTcp } from '@dsbot/node-protocol/tcp'
@@ -65,16 +65,25 @@ function fail(message) {
   process.exit(2)
 }
 
-// deviceId 是这台机器的身份：主机用它判断"同一台重连"还是"新机器"。
+// 这台机器是谁：主机靠它判断"同一台重连"还是"新机器"。
+// 有 device.json 就听它的。写不了盘的情况（手机 /opt/dsh 只读、容器、只读 home）
+// 不能每次随机发一个 —— 那样每次连都是新身份，主机的设备列表里就会一次一条地
+// 堆出"手机""手机测试""手机 2"。退到机器指纹：同一台机器永远同一个 id。
+function machineFingerprint() {
+  const parts = [hostname(), platform(), arch()]
+  try { parts.push(userInfo().username) } catch { /* 取不到就不算它 */ }
+  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 10)
+}
+
 export async function deviceIdentity(name) {
   const file = join(HOME, 'device.json')
   try {
     const saved = JSON.parse(await readFile(file, 'utf8'))
     if (typeof saved?.deviceId === 'string') return saved.deviceId
   } catch {
-    // 第一次跑，或文件坏了：重新发一个，不拦路。
+    // 第一次跑，或文件坏了：下面按指纹算一个，不拦路。
   }
-  const deviceId = `d-${randomBytes(4).toString('hex')}`
+  const deviceId = `d-${machineFingerprint()}`
   await mkdir(HOME, { recursive: true }).catch(() => {})
   await writeFile(file, JSON.stringify({ deviceId, name, createdAt: Date.now() }, null, 2), 'utf8').catch(() => {})
   return deviceId

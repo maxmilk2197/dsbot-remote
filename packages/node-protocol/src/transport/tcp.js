@@ -79,6 +79,14 @@ class Peer extends EventEmitter {
     socket.on('error', (error) => this.safeEmit('socket-error', error))
     socket.on('close', () => this.finish())
     this.touch()
+    // 心跳。空闲超时到点就 close，而这条管子大部分时间是没业务的：主机在等人
+    // 说话，远端在等派活。谁都不发帧 → 两端都把对方判成死连接（实测正好 60 秒
+    // 断一次，看着像"连上了又自己掉线"）。协议里本来就有 ping/pong，只是从来
+    // 没人发。三分之一个 idle 发一次，留三倍余量，丢一两个包也不至于误杀。
+    this.beat = setInterval(() => {
+      if (!this.closed) this.send({ t: 'ping' })
+    }, Math.max(50, Math.floor(idleMs / 3)))
+    this.beat.unref?.()
   }
 
   emit(event, ...args) {
@@ -143,6 +151,7 @@ class Peer extends EventEmitter {
     if (this.closed) return
     this.closed = true
     clearTimeout(this.timer)
+    clearInterval(this.beat)
     this.socket.destroy()
     this.finish()
   }
@@ -152,6 +161,7 @@ class Peer extends EventEmitter {
     this.done = true
     this.closed = true
     clearTimeout(this.timer)
+    clearInterval(this.beat)
     // 这条是在 socket 的 close 事件里同步跑的。close 监听器里抛出来的错会变成
     // uncaughtException —— 宿主只看到"某条连接断了"就把整个进程退掉。断线本该是
     // 最平常的一件坏事，不能让它带上进程。

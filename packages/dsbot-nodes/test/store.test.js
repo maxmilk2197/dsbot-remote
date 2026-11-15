@@ -118,3 +118,19 @@ test('touch 记下最后一次在线时间与状态', async () => {
   assert.equal(touched.status, 'online')
   assert.equal(touched.lastSeenAt, 900)
 })
+
+// 一次读盘抖动不该等于"节点全丢"。
+// 以前的写法：读不懂就当空的 → 下一次 save 把空数据写回去 → 用户连过的机器没了。
+test('nodes.json 坏了就不许写：原文件一个字节都不动', async () => {
+  const root = home()
+  const file = join(root, 'nodes.json')
+  writeFileSync(file, '{"version":1,"nodes":{', 'utf8')  // 半个 JSON
+  const warnings = []
+  const store = storeAt(root, { warn: (message) => warnings.push(String(message)) })
+
+  await store.load()
+  assert.deepEqual(store.list(), [])
+  await assert.rejects(store.add({ name: '新的' }), /读不出来/)
+  assert.equal(readFileSync(file, 'utf8'), '{"version":1,"nodes":{', '文本必须原样留着')
+  assert.match(warnings.join('\n'), /不写盘/)
+})

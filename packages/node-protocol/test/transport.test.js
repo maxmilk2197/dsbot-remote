@@ -131,3 +131,21 @@ test('帧监听器抛错：只上报 listener-error，连接还能用', async ()
     server.close()
   }
 })
+
+// 空闲的管子会自杀：idleMs 到点就 close，而没人主动发帧。
+// 实测就是"连上 60 秒后自己断开"。心跳必须在协议层，两端都要有。
+test('空闲连接靠心跳活着，不会被自己掐死', async () => {
+  const server = await listenTcp({ port: 0, host: '127.0.0.1', token: 'beat-token-1', idleMs: 300 })
+  const client = await connectTcp({ url: `tcp://127.0.0.1:${server.port}`, token: 'beat-token-1', idleMs: 300 })
+  const closed = []
+  client.on('close', () => closed.push(Date.now()))
+  try {
+    // 四个 idle 周期，一个业务帧都没有。
+    await new Promise(done => setTimeout(done, 1200))
+    assert.equal(closed.length, 0, '空闲不该断线')
+    assert.equal(client.closed, false)
+  } finally {
+    client.close()
+    server.close()
+  }
+})

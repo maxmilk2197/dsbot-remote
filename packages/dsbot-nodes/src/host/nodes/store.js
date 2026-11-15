@@ -29,8 +29,13 @@ export function createNodeStore({ home, readOnly = () => undefined, warn = () =>
   let data = empty()
   let loaded = false
 
-  const writable = () => readOnly() === undefined
+  // 读失败过就是 broken：此时任何写操作都会把磁盘上那份真的记录盖成空。
+  let broken = null
+  const writable = () => readOnly() === undefined && broken === null
   const guard = () => {
+    if (broken !== null) {
+      throw new NodeFailure('node/read-only', `nodes.json 读不出来，这次先不写：${broken.message}`)
+    }
     if (writable()) return undefined
     throw new NodeFailure('node/read-only', readOnly())
   }
@@ -50,13 +55,19 @@ export function createNodeStore({ home, readOnly = () => undefined, warn = () =>
           : { code: null, port: 7777 },
       }
     } catch (error) {
-      if (error.code !== 'ENOENT') warn(`nodes.json 读不出来，按空的算：${error.message}`)
+      if (error.code === 'ENOENT') return data
+      // 文件在、但读不懂（半个 JSON、被锁住、编码坏了）：这一次运行绝对不许写盘。
+      // 空数据写回去就是把用户已经连过的机器全部抹掉 —— 而这只需要一次读盘抖动。
+      broken = error
+      warn(`nodes.json 读不出来（${error.message}）：这次不写盘，免得把已有记录盖掉`)
     }
     return data
   }
 
   let queue = Promise.resolve()
   function save() {
+    // 读坏了就别写：见 load() 里 broken 的说明。
+    if (broken !== null) return Promise.resolve()
     // 串行化：两次 save 共用同一个 .tmp 名，撞上了会互相把对方的 rename 弄没。
     const run = async () => {
     guard()

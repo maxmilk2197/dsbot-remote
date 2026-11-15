@@ -50,6 +50,91 @@ window.__ModuleLoader__.load({
       },
     }, label)
 
+    function NodeCard({ node, groups, busy, act, onRename }) {
+      const [editing, setEditing] = React.useState(false)
+      const [draft, setDraft] = React.useState(node.name)
+      React.useEffect(() => { setDraft(node.name) }, [node.name])
+
+      const joined = node.groups || []
+      const save = async () => {
+        const name = String(draft || '').trim()
+        setEditing(false)
+        if (name === '' || name === node.name) return
+        await onRename(node.id, name)
+      }
+
+      return card([
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+          dot(node.status === 'online'),
+          editing
+            ? h('input', {
+              value: draft,
+              autoFocus: true,
+              onChange: (event) => setDraft(event.target.value),
+              onBlur: save,
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') save()
+                if (event.key === 'Escape') { setDraft(node.name); setEditing(false) }
+              },
+              style: {
+                padding: '3px 8px', borderRadius: 6, fontSize: 13.5, width: 160,
+                border: '1px solid var(--border, #d6d8db)', background: 'transparent', color: 'inherit',
+              },
+            })
+            : h('div', {
+              style: { fontWeight: 600, fontSize: 13.5, cursor: 'text' },
+              title: '点一下改名',
+              onClick: () => setEditing(true),
+            }, node.name),
+          node.botName
+            ? h('div', { style: { fontSize: 12, opacity: 0.6 } }, '代表 Bot：' + node.botName)
+            : null,
+          h('div', { style: { marginLeft: 'auto', fontSize: 12, opacity: 0.55 } },
+            (node.caps || []).join(' / ') || '—'),
+        ),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('select', {
+            // value 恒为 ''：这样点开永远能看到全部群。设成当前群 id 的话，群一多
+            // 或者群被删了，浏览器会退回占位项，看着就像"这个下拉是空的"。
+            value: '',
+            onChange: (event) => {
+              const groupId = event.target.value
+              if (groupId === '') return
+              act('bind', () => jpost('/bind', { node: node.id, group: groupId }))
+            },
+            style: { padding: '5px 8px', borderRadius: 8, fontSize: 12.5, maxWidth: 260 },
+          },
+            h('option', { value: '' },
+              groups.length === 0
+                ? '还没有群可以加入'
+                : joined.length > 0 ? '再加入一个群…' : '选择要加入的群…'),
+            groups.map(group => h('option', { key: group.id, value: group.id },
+              group.name + (group.members === undefined ? '' : `（${group.members} 人）`))),
+          ),
+          joined.map(group => h('div', {
+            key: group.id,
+            style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 },
+          },
+            h('span', { style: { opacity: 0.75 } }, '在：' + (group.name || group.id)),
+            h('button', {
+              onClick: () => act('unbind', () => jpost('/unbind', { node: node.id, group: group.id })),
+              style: {
+                border: 'none', background: 'transparent', cursor: 'pointer',
+                fontSize: 12.5, opacity: 0.6, padding: 0, color: 'inherit',
+              },
+            }, '退出'),
+          )),
+          h('button', {
+            onClick: () => act('forget:' + node.id, () => jpost('/forget', { node: node.id })),
+            style: {
+              marginLeft: 'auto', border: 'none', background: 'transparent', cursor: 'pointer',
+              fontSize: 12.5, opacity: 0.55, padding: 0, color: 'inherit',
+            },
+          }, busy === 'forget:' + node.id ? '移除中…' : '移除这台机器'),
+        ),
+      ], node.id)
+    }
+
     function Panel() {
       const [state, setState] = React.useState(null)
       const [groups, setGroups] = React.useState([])
@@ -60,9 +145,11 @@ window.__ModuleLoader__.load({
 
       const refresh = async () => {
         try {
-          const [status, groupList] = await Promise.all([jget('/status'), jget('/groups')])
+          // 群列表跟着 /status 一起回来。以前单开一个 /groups，那个口一挂整页就
+          // 只剩一个空下拉，看着像"选不了群"，其实是一个请求失败拖垮了整块状态。
+          const status = await jget('/status')
           setState(status)
-          setGroups(groupList.groups || [])
+          setGroups(status.groups || [])
           setError('')
         } catch (e) {
           setError('读不到状态：' + e.message)
@@ -156,34 +243,14 @@ window.__ModuleLoader__.load({
 
         nodes.length === 0
           ? h('div', { style: { fontSize: 13, opacity: 0.6, padding: '8px 0' } }, '还没有机器连过来')
-          : nodes.map(node => card([
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
-              dot(node.status === 'online'),
-              h('div', { style: { fontWeight: 600, fontSize: 13.5 } }, node.name),
-              node.botName
-                ? h('div', { style: { fontSize: 12, opacity: 0.6 } }, '代表 Bot：' + node.botName)
-                : null,
-              h('div', { style: { marginLeft: 'auto', fontSize: 12, opacity: 0.55 } },
-                (node.caps || []).join(' / ') || '—'),
-            ),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-              h('select', {
-                value: (node.groups || [])[0] || '',
-                onChange: (event) => {
-                  const groupId = event.target.value
-                  if (groupId === '') return
-                  act('bind', () => jpost('/bind', { node: node.id, group: groupId }))
-                },
-                style: { padding: '5px 8px', borderRadius: 8, fontSize: 12.5, maxWidth: 260 },
-              },
-                h('option', { value: '' }, node.groups && node.groups.length ? '已在群里（换一个）' : '选择要加入的群…'),
-                groups.map(group => h('option', { key: group.id, value: group.id }, group.name)),
-              ),
-              node.groups && node.groups.length
-                ? button('退出群', () => act('unbind', () => jpost('/unbind', { node: node.id })))
-                : null,
-            ),
-          ], node.id)),
+          : nodes.map(node => h(NodeCard, {
+            key: node.id,
+            node,
+            groups,
+            busy,
+            act,
+            onRename: (id, name) => act('rename', () => jpost('/rename', { node: id, name })),
+          })),
       )
     }
 

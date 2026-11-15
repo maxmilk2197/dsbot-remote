@@ -37,7 +37,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { bindNodeToGroup, forgetNode, unbindNodeFromGroup } from './bind.js'
-import { createAdapterClass, routeOf } from './adapter.js'
+import { createAdapterClass, nodeIdOf, routeOf } from './adapter.js'
 import { acceptUpload } from './files.js'
 import { createNodeStore } from './store.js'
 import { createHosting } from './hosting.js'
@@ -63,7 +63,21 @@ function bootNote(text) {
 
 bootNote('module imported')
 
+// DSH 会把同一个插件装进好几个上下文：日志里一次热重载能看到 install 连跑七遍。
+// 每遍都新建一个 store、抢一次 7777、往 teamTools 里推一份工具、挂一份路由 ——
+// 于是界面有的口读到这份数据、有的口读到那份，表现就是"列表是空的、下拉也是空的"；
+// 更糟的是两份 store 各自写盘，能把节点记录写没。同一个 runtime 只装一次。
+const installed = new WeakMap()
+
 export function install(rt) {
+  const cached = installed.get(rt)
+  if (cached !== undefined) return cached
+  const api = installOnce(rt)
+  installed.set(rt, api)
+  return api
+}
+
+function installOnce(rt) {
   bootNote('install')
 
   const { ctx } = rt
@@ -343,6 +357,32 @@ ${links.join(' ')}`
   })
   void hosting.start().catch(error => warn(`远程节点监听没起来：${error.message}`))
 
+  // 自愈：节点删了，它的代理 Bot 还留在群里。那种 Bot 的 model 指向一个已经不存在
+  // 的 node，谁也用不了它，但它还占着成员位置、还能被 @ 到，界面上看着就像多了一个
+  // 莫名其妙的"手机""手机测试"。每次加载扫一遍，把这种孤儿收掉。
+  const sweepOrphans = async () => {
+    // 必须先等盘读完：store 是懒加载的，list() 在 load 之前返回空数组 ——
+    // 那样"已知节点"是空集合，所有代理 Bot 都会被当成孤儿删掉。
+    await store.load()
+    const known = new Set(store.list().map(node => node.id))
+    for (const room of Object.values(rt.state?.rooms ?? {})) {
+      for (const memberId of [...(room.members ?? [])]) {
+        const bot = rt.botOf?.(memberId)
+        if (bot === undefined) continue
+        const target = nodeIdOf(String(bot.model ?? ''))
+        if (target === undefined || known.has(target)) continue
+        try {
+          await rt.updateRoom?.(room.id, { remove: [memberId] })
+          await rt.deleteBot?.(memberId)
+          warn('dsbot-nodes: 清掉孤儿成员 %s（节点 %s 已经不在了）', bot.name ?? memberId, target)
+        } catch (error) {
+          warn('dsbot-nodes: 清 %s 失败：%s', memberId, error?.message ?? error)
+        }
+      }
+    }
+  }
+  void sweepOrphans().catch(error => warn('dsbot-nodes: 扫孤儿成员失败：%s', error?.message ?? error))
+
   // 反过来的那一半：这台机器也可以"加入别人的群"。
   const joiner = createJoiner({ home: rt.home, warn: message => warn(message) })
 
@@ -427,6 +467,17 @@ const readBody = req => new Promise((resolve) => {
   req.on('error', () => resolve({}))
 })
 
+// 群列表只有一处真源：ds-bot 的 state.rooms。名字缺失时退回 id，不让界面出现空选项。
+const listGroups = (rt) => {
+  const rooms = rt.state?.rooms
+  if (rooms === undefined || rooms === null) return []
+  return Object.values(rooms).map(room => ({
+    id: room.id,
+    name: room.name || room.id,
+    members: (room.members ?? []).length,
+  }))
+}
+
 // 设置页读的就是这几个口：状态、换码、绑定、解绑。全走 JSON，不靠 HTML 表单。
 function registerRoutes(rt, api, hosting) {
   const ctx = rt.ctx
@@ -436,6 +487,9 @@ function registerRoutes(rt, api, hosting) {
     const url = new URL(req.url, 'http://localhost')
     const path = url.pathname.replace(/\/+$/, '')
     try {
+      // store 是懒加载的，list()/node() 在 load 之前是空的。界面问得太早时，
+      // 不能让它看到"一台机器都没有"。
+      await api.store?.load?.()
       if (req.method === 'GET' && path === '/api/nodes/status') {
         return sendJson(res, 200, {
           ok: true,
@@ -446,11 +500,25 @@ function registerRoutes(rt, api, hosting) {
             botName: node.botName ?? '',
             status: node.status ?? 'offline',
             caps: node.caps ?? [],
-            groups: node.groups ?? [],
+            groups: (node.groups ?? []).map(id => {
+              const room = rt.roomOf?.(id)
+              return { id, name: room?.name ?? id }
+            }),
             lastSeenAt: node.lastSeenAt ?? null,
           })),
+          // 群列表跟着状态一起给：界面只要一次请求，少一个"另一个口挂了就整页空白"
+          // 的失败点。之前它单独走 /groups，那个口一出问题下拉就是空的。
+          groups: listGroups(rt),
           join: api.joinStatus(),
         })
+      }
+      if (req.method === 'POST' && path === '/api/nodes/rename') {
+        const body = await readBody(req)
+        const node = api.resolveNode(body.node)
+        const name = String(body.name ?? '').trim().slice(0, 40)
+        if (name === '') return sendJson(res, 400, { ok: false, error: '名字不能是空的' })
+        await api.store.update(node.id, { name })
+        return sendJson(res, 200, { ok: true, name })
       }
       if (req.method === 'POST' && path === '/api/nodes/join') {
         const body = await readBody(req)
@@ -466,15 +534,7 @@ function registerRoutes(rt, api, hosting) {
         return sendJson(res, 200, { ok: true, ...(await hosting.rotate()) })
       }
       if (req.method === 'GET' && path === '/api/nodes/groups') {
-        const rooms = Object.values(rt.state?.rooms ?? {})
-        return sendJson(res, 200, {
-          ok: true,
-          groups: rooms.map(room => ({
-            id: room.id,
-            name: room.name,
-            members: (room.members ?? []).length,
-          })),
-        })
+        return sendJson(res, 200, { ok: true, groups: listGroups(rt) })
       }
       if (req.method === 'POST' && path === '/api/nodes/bind') {
         const body = await readBody(req)
