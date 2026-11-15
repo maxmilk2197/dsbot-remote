@@ -447,6 +447,12 @@ function registerRoutes(rt, api, hosting) {
         await api.unbind({ nodeId: node.id, groupId: target })
         return sendJson(res, 200, { ok: true })
       }
+      if (req.method === 'POST' && path === '/api/nodes/forget') {
+        const body = await readBody(req)
+        const node = api.resolveNode(body.node)
+        await api.forget({ nodeId: node.id })
+        return sendJson(res, 200, { ok: true })
+      }
       return sendJson(res, 404, { ok: false, error: `没有这个口：${path}` })
     } catch (error) {
       return sendJson(res, 400, { ok: false, error: error?.message ?? String(error), code: error?.code })
