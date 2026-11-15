@@ -33,6 +33,7 @@ listen    等主机来连（主线；会给出一个配对码）
 
 pair      输入配对码接上主机（日常只需要这条）
   --code <码>        6 位配对码，必需
+  --to <ip:端口>     跳过广播，直连这台主机（不同网段、手机热点、广播被墙时用）
   --network          先加入 EasyTier 虚拟网（跨网络时用；同局域网可省）
   --name / --cwd / --agent   同上
 
@@ -103,7 +104,7 @@ async function collectAttachments(text) {
 }
 
 export function servePeer(peer, { name, deviceId, cwd, agent }) {
-  say(`主机已连上 ${peer.remote}`)
+  say(`主机已连上 ${peer.remote ?? '主机'}`)
   const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
   peer.send({ id: 'hello', method: 'node.hello', params: { name, deviceId, caps } })
   const turns = new Map()
@@ -249,8 +250,16 @@ async function runPair(args) {
   }
 
   try {
-    say(`找配对码 ${code} 的主机…`)
-    const host = await findHost({ code, onProbe: address => say(`  询问 ${address}`) })
+    let host
+    if (typeof args.to === 'string' && args.to !== '') {
+      // 不在同一个广播域时用这个：手机热点、跨网段、或者广播被防火墙吃了。
+      const [rawHost, rawPort] = args.to.replace(/^tcp:\/\//, '').split(':')
+      host = { host: rawHost, port: Number(rawPort) > 0 ? Number(rawPort) : 7777, name: rawHost }
+      say(`直接连 ${host.host}:${host.port}（跳过广播）`)
+    } else {
+      say(`找配对码 ${code} 的主机…`)
+      host = await findHost({ code, onProbe: address => say(`  询问 ${address}`) })
+    }
     say(`找到 ${host.name || '主机'} ${host.host}:${host.port}`)
 
     const peer = await connectTcp({ url: `tcp://${host.host}:${host.port}`, token: code })
