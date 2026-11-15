@@ -14,11 +14,13 @@ export function createHosting({
   attach,
   warn = () => {},
   hostName = 'DSH 主机',
-  // 跨网开关。默认关：EasyTier 是个常驻子进程，一启动就占资源、还要连外部会合点，
-  // 在 DSH 启动阶段跟其它插件的 RPC 抢时间 —— crash-2026-11-15T07-32-19 那次
-  // 就是启动期 MeshCallError: Call deadline exceeded。先把主流程保稳，
-  // 跨网做成用户自己要的时候才开（设置页有开关）。
-  network = false,
+  // 跨网开关。默认开：用户要的是"输个码就通"，不该还得自己点一下。
+  //
+  // 之前误以为是它在启动期拖垮了 DSH，关过一阵；后来定位到真正的死因是
+  // dsh-app-boot 把任何 unhandledRejection 都当 fatal（已单独打补丁），
+  // 跟 EasyTier 无关。现在插件本身也延迟到启动完成之后再装，两条路都让开了。
+  // 想关掉仍可以走 disableNetwork() / POST /api/nodes/network。
+  network = 'auto',
 }) {
   let current = null
   // 虚拟网的现状：on 表示进程活着，ipv4 是它在虚拟网里的地址（要告诉对面）。
@@ -93,7 +95,11 @@ export function createHosting({
     current = { code: chosen, port: server.port, server, discovery }
     warn(`等你来连：配对码 ${chosen}，端口 ${server.port}`)
     // 虚拟网放在后面异步起：起不来也不能耽误局域网这条道。
-    void startNetwork(chosen, server.port)
+    // 这里必须自己兜 rejection —— 漏出去会变成宿主的 unhandledRejection。
+    void startNetwork(chosen, server.port).catch(error => {
+      virtual = { ...virtual, on: false, error: String(error?.message ?? error) }
+      warn(`dsbot-nodes: 跨网启动失败：${virtual.error} —— 同局域网照常用`)
+    })
     return status()
   }
 
