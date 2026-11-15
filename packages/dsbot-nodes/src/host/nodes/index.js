@@ -254,7 +254,8 @@ export function install(rt) {
   const acceptPeer = peer => attach(peer).then(
     value => value,
     error => {
-      warn('dsbot-nodes: 远端没握上手：%s', error?.message ?? error)
+      // 带上地址：下次再出问题，至少要能从日志看出是哪台机器、哪个 IP 没握上手。
+      warn('dsbot-nodes: %s 没握上手：%s', peer?.remote ?? '远端', error?.message ?? error)
       return { nodeId: null, record: null, failed: error }
     },
   )
