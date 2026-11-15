@@ -6,6 +6,7 @@
 // 跑起来之后它就是一个"节点"：报身份、接主机发来的 node.exec、把结果发回去。
 // 群里的发言不在这里 —— 那是主机拿这一轮 turn 的输出写进去的，见 README。
 import { createHash } from 'node:crypto'
+import net from 'node:net'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { arch, homedir, hostname, platform, userInfo } from 'node:os'
 import { basename, join } from 'node:path'
@@ -112,15 +113,69 @@ async function collectAttachments(text) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788 }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
   peer.send({ id: 'hello', method: 'node.hello', params: { name, deviceId, caps } })
   const turns = new Map()
+  let groups = []
+  let postSeq = 0
+
+  // 往群里说一句话。主机侧走 node.post，以这台机器在群里的那个 Bot 的身份落进群，
+  // 和主机自己发消息走同一条路。
+  const postText = (text) => {
+    const group = groups[0]
+    if (group === undefined) { say('还没进任何群，这句话没发出去'); return }
+    postSeq += 1
+    peer.send({ id: `post-${postSeq}`, method: 'node.post', params: { groupId: group.id, text } })
+    say(`发到「${group.name}」：${text}`)
+  }
+
+  // 本地信箱：这台机器上的别的进程（另一个 agent、一个脚本、你自己）想说话，
+  // 往 127.0.0.1:7788 写一行就行。只监听回环，外面的机器连不上。
+  const startInbox = (port) => {
+    const server = net.createServer((socket) => {
+      socket.setEncoding('utf8')
+      let buffer = ''
+      const drain = () => {
+        let at = buffer.indexOf('\n')
+        while (at >= 0) {
+          const line = buffer.slice(0, at).trim()
+          buffer = buffer.slice(at + 1)
+          if (line !== '') postText(line)
+          at = buffer.indexOf('\n')
+        }
+      }
+      socket.on('data', (chunk) => { buffer += chunk; drain() })
+      socket.on('end', () => { const rest = buffer.trim(); buffer = ''; if (rest !== '') postText(rest) })
+      socket.on('error', () => {})
+    })
+    server.on('error', (error) => {
+      if (port !== 0) { say(`${port} 端口被占了，换一个随机的`); startInbox(0); return }
+      say(`本地信箱没起来：${error.message}`)
+    })
+    server.listen(port, '127.0.0.1', () => {
+      say(`往群里说话：把一行字写到 127.0.0.1:${server.address().port}（不占终端）`)
+    })
+    server.unref?.()
+  }
+  if (inbox !== false && inbox !== null) startInbox(Number(inbox) || 0)
 
   peer.on('frame', async (frame) => {
-    // response / error 是主机对前面某个请求的回答，这里没有等待中的请求，忽略。
-    if (frame?.id !== undefined && (frame.result !== undefined || frame.error !== undefined)) return
+    if (frame?.id === 'hello') {
+      if (Array.isArray(frame.result?.groups)) {
+        groups = frame.result.groups
+        if (groups.length > 0) say(`在群里：${groups.map(group => group.name).join('、')}`)
+      }
+      return
+    }
+    // error 要说出来：发消息被拒的时候，日志里得有一句为什么。
+    if (frame?.id !== undefined && frame.error !== undefined) {
+      say(`主机说：${frame.error.message ?? frame.error.code}`)
+      return
+    }
+    // 对前面某个请求的回答，这里没有别的等待中的请求，忽略。
+    if (frame?.id !== undefined && frame.result !== undefined) return
     if (typeof frame?.method !== 'string') return
 
     if (frame.method === 'node.exec') {

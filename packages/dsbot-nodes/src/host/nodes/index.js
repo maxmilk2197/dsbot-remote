@@ -222,7 +222,11 @@ function installOnce(rt) {
           caps: Array.isArray(params.caps) ? params.caps : [],
         })
 
-        if (frame.id !== undefined) peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId } })
+        // 回执里带上它进了哪些群：远端要把"这台机器在哪个群里"显示出来，
+        // 主动说话（node.post）时也得知道往哪个群发。
+        if (frame.id !== undefined) {
+          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: listGroups(rt) } })
+        }
 
         peers.set(nodeId, peer)
         const drop = () => {
@@ -277,6 +281,45 @@ function installOnce(rt) {
 
   // ---- 入站帧 ----
 
+  // 远端主动插话：以它在群里那个 Bot 的身份把这句话写进群。
+  // 和主机自己发消息走同一条路（rt.postToRoom），所以群里的轮次、@、存档都一致。
+  const postFromNode = async (nodeId, frame) => {
+    const peer = peers.get(nodeId)
+    const answer = payload => { if (frame.id !== undefined) peer?.send({ id: frame.id, ...payload }) }
+    const node = store.node(nodeId)
+    const bot = node?.botId === undefined ? undefined : rt.botOf?.(node.botId)
+    if (bot === undefined) {
+      answer({ error: { code: 'node/not-bound', message: '这台机器还没进任何群' } })
+      return
+    }
+    const params = frame.params ?? {}
+    const wanted = String(params.groupId ?? '').trim()
+    // 没指定群就用它进的第一个群：远端多半只知道"我在某个群"，不知道 id。
+    const room = wanted === ''
+      ? (node.groups ?? []).map(id => rt.roomOf?.(id)).find(Boolean)
+      : rt.roomOf?.(wanted)
+    if (room === undefined) {
+      answer({ error: { code: 'node/not-found', message: '没有这个群' } })
+      return
+    }
+    if (!(room.members ?? []).includes(bot.id)) {
+      answer({ error: { code: 'node/denied', message: `这台机器不在「${room.name}」里` } })
+      return
+    }
+    const text = String(params.text ?? '').trim()
+    if (text === '') {
+      answer({ error: { code: 'node/bad-params', message: '要说什么？' } })
+      return
+    }
+    if (typeof rt.postToRoom !== 'function') {
+      answer({ error: { code: 'node/unsupported', message: '这个版本的 ds-bot 不支持代发' } })
+      return
+    }
+    await rt.postToRoom(room, bot, text)
+    answer({ result: { ok: true, groupId: room.id, at: Date.now() } })
+    warn('dsbot-nodes: %s 在「%s」说了一句', bot.name ?? nodeId, room.name)
+  }
+
   const handleFrame = (nodeId, frame) => {
     if (frame === null || typeof frame !== 'object') return
     // response / error：配对上之前的 call
@@ -293,8 +336,13 @@ function installOnce(rt) {
       return
     }
     if (typeof frame.method !== 'string') return
-    // v1 不让远端主动调主机的方法：它要读群、发消息，走的是主机下发的工具，
-    // 那些工具的实现在主机这边，远端调不到。收到就明确拒绝，不假装成功。
+    // node.post 是唯一一个远端主动发起、主机必须理会的：它在群里说一句话。
+    // 其余方法仍然拒绝 —— 远端不该能读群、建群、加成员。
+    if (frame.method === 'node.post') {
+      void postFromNode(nodeId, frame).catch(error =>
+        warn('dsbot-nodes: %s 说话失败：%s', nodeId, error?.message ?? error))
+      return
+    }
     if (frame.id !== undefined) {
       const peer = peers.get(nodeId)
       peer?.send({ id: frame.id, error: { code: 'node/unsupported', message: `主机不接 ${frame.method}` } })
@@ -312,7 +360,15 @@ function installOnce(rt) {
     toolDefs: () => [],
     cwdFor: () => undefined,
     deadlineMs: 30 * 60_000,
-    audit: (event, data) => rt.ledger?.(event, data),
+    // 审计只用来事后回溯，绝不能因为它把一轮弄挂。ds-bot 的 rt.ledger 是个
+    // 对象（open/append/record/search…），不是函数 —— 以前写成 rt.ledger?.(…)
+    // 会当场抛 "rt.ledger is not a function"，整轮断在这里，群里就是那句
+    // "手机 停下来了：rt.ledger is not a function"。
+    audit: (event, data) => {
+      try {
+        warn('dsbot-nodes: %s %s', event, JSON.stringify(data ?? {}).slice(0, 300))
+      } catch { /* 日志写不出去也不能影响这一轮 */ }
+    },
     // 远端在轮末报回来的文件落到 <home>/outbox/<nodeId>/，路径拼成链接接在这轮话的后面。
     // 不另发一条消息：那会打乱群里的发言顺序。
     async onTurnFiles({ nodeId, files }) {
