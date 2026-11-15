@@ -417,40 +417,35 @@ ${links.join(' ')}`
   // 自愈：节点删了，它的代理 Bot 还留在群里。那种 Bot 的 model 指向一个已经不存在
   // 的 node，谁也用不了它，但它还占着成员位置、还能被 @ 到，界面上看着就像多了一个
   // 莫名其妙的"手机""手机测试"。每次加载扫一遍，把这种孤儿收掉。
+  // 启动时看一眼群里的远程成员，只报告、不动手。
+  //
+  // 这里原本会自动删：节点不存在的算孤儿，同群重复的只留一个。第一次跑就把
+  // 用户正在用的「手机」删了 —— nodes.json 被写空过，谁"登记在案"完全不可信，
+  // 照着它删等于拿运气赌用户的数据。删群成员是不可逆的，留一个重复项只是难看，
+  // 所以现在只写日志，清理由用户在界面点。
   const sweepOrphans = async () => {
     // 必须先等盘读完：store 是懒加载的，list() 在 load 之前返回空数组 ——
-    // 那样"已知节点"是空集合，所有代理 Bot 都会被当成孤儿删掉。
+    // 那样"已知节点"是空集合，所有远程成员都会被报成孤儿。
     await store.load()
-    const nodes = store.list()
-    const known = new Set(nodes.map(node => node.id))
-    // node 自己记着的那个 Bot 优先留下：同一个群里如果站着两个都指着这台机器
-    // （并发点击的产物），要留的是登记在案的那个。
-    const preferred = new Map(nodes.filter(node => node.botId !== undefined).map(node => [node.id, node.botId]))
-
+    const known = new Set(store.list().map(node => node.id))
     for (const room of Object.values(rt.state?.rooms ?? {})) {
-      const members = [...(room.members ?? [])]
-      const claimed = new Map()   // nodeId -> 这个群里留给它的 botId
-      for (const memberId of members) {
-        const target = nodeIdOf(String(rt.botOf?.(memberId)?.model ?? ''))
-        if (target !== undefined && preferred.get(target) === memberId) claimed.set(target, memberId)
-      }
-      for (const memberId of members) {
+      const byNode = new Map()   // nodeId -> [成员名]
+      for (const memberId of [...(room.members ?? [])]) {
         const bot = rt.botOf?.(memberId)
         if (bot === undefined) continue
         const target = nodeIdOf(String(bot.model ?? ''))
         if (target === undefined) continue
-        const why = !known.has(target)
-          ? `节点 ${target} 已经不在了`
-          : claimed.has(target) && claimed.get(target) !== memberId
-            ? `同一台机器在群里已经有 ${rt.botOf?.(claimed.get(target))?.name ?? claimed.get(target)} 了`
-            : undefined
-        if (why === undefined) { claimed.set(target, memberId); continue }
-        try {
-          await rt.updateRoom?.(room.id, { remove: [memberId] })
-          await rt.deleteBot?.(memberId)
-          warn('dsbot-nodes: 清掉成员 %s（%s）', bot.name ?? memberId, why)
-        } catch (error) {
-          warn('dsbot-nodes: 清 %s 失败：%s', memberId, error?.message ?? error)
+        if (!known.has(target)) {
+          warn('dsbot-nodes: 「%s」里的 %s 指向已不存在的节点 %s —— 留着不动，确认不要了再在设置页移除',
+            room.name, bot.name ?? memberId, target)
+          continue
+        }
+        byNode.set(target, [...(byNode.get(target) ?? []), bot.name ?? memberId])
+      }
+      for (const [target, names] of byNode) {
+        if (names.length > 1) {
+          warn('dsbot-nodes: 「%s」里有 %s 都指向同一台机器（%s），留哪个由你决定',
+            room.name, names.join('、'), target)
         }
       }
     }
