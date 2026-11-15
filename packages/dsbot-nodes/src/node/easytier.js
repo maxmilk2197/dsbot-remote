@@ -14,9 +14,9 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { access, constants, readdir } from 'node:fs/promises'
+import { access, constants, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { homedir, networkInterfaces } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 
 export const EASYTIER_DIR = join(homedir(), '.dsbot-remote', 'easytier')
 /** 随包分发的 EasyTier（内置，用户不用另装）。目录按平台分：vendor/easytier/win32-x64/ */
@@ -136,7 +136,13 @@ export function startEasyTier({
     ...extraArgs,
   ]
 
-  const child = spawn(core, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  // cwd 必须跟着二进制走：EasyTier 要在自己旁边找 wintun.dll 建虚拟网卡。
+  // 从别的目录拉起来它会报 Failed to create adapter —— 看着像没权限，其实是找不到 DLL。
+  const child = spawn(core, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    cwd: dirname(core),
+  })
 
   let output = ''
   const feed = (chunk) => {
@@ -250,6 +256,44 @@ export function buildElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
 }
 
 /**
+ * 生成一个「右键以管理员身份运行」的脚本，作为提权失败时的兜底。
+ *
+ * 为什么需要它：DSH 的 Node 进程不在交互式桌面会话里，`Start-Process -Verb RunAs`
+ * 会一直死等一个永远不会出现的 UAC 确认。用户点按钮看到的就是"没反应"。
+ * 而这个 .bat 由用户自己在资源管理器里右键运行 —— 那时候有桌面，提权一定成。
+ */
+export async function writeElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
+  const { networkName, networkSecret } = pairCredentials(code)
+  const args = [
+    '-i', HOST_VIRTUAL_IP,
+    '--network-name', networkName,
+    '--network-secret', networkSecret,
+    ...servers.flatMap(server => ['-p', server]),
+  ]
+  const dir = join(homedir(), '.dsbot-remote')
+  await mkdir(dir, { recursive: true }).catch(() => {})
+  const file = join(dir, 'start-easytier-as-admin.bat')
+  const body = [
+    '@echo off',
+    'chcp 437 >nul',
+    // 内容全走 ASCII：cmd 按系统 ANSI 代码页解析 bat 文件，中文 Windows 是 GBK，
+    // 用 UTF-8 写进来的中文会变成乱码（加 BOM 又会让第一行报"不是内部命令"）。
+    // 命令行本身（路径 + 参数）本来就没中文，所以功能不受影响，提示交给界面去说。
+    `title dsbot cross-network - ${code}`,
+    'echo Starting cross-network helper (EasyTier).',
+    'echo Keep this window open; closing it stops cross-network.',
+    'echo.',
+    `"${core}" ${args.map(each => (/\s/.test(each) ? `"${each}"` : each)).join(' ')}`,
+    'echo.',
+    'echo Exited.',
+    'pause',
+  ].join('\r\n')
+  // bat 必须是 CRLF，否则 cmd 会把行尾的字符当命令的一部分。
+  await writeFile(file, body, 'utf8')
+  return file
+}
+
+/**
  * 用管理员权限起一条 EasyTier。Windows 会弹 UAC，用户点"是"才继续。
  * ---------------------------------------------------------------------------
  * 为什么单独做这一步：建 TUN 网卡要管理员，而 DSH 平时是普通权限启动的。
@@ -276,8 +320,10 @@ export async function elevateEasyTier({ core, code, servers = DEFAULT_SERVERS })
 
     const timer = setTimeout(() => {
       try { child.kill() } catch {}
-      resolve({ ok: false, error: '提权超时（UAC 窗口可能还在等你确认）' })
-    }, 90_000)
+      // 15 秒还没退出就是挂住了：这个进程弹不出权限确认窗口（DSH 的 Node 不在
+      // 交互式桌面会话里，UAC 永远等不到）。兜底脚本由调用方准备，这里只报告。
+      resolve({ ok: false, error: '这个进程弹不出权限确认窗口' })
+    }, 15_000)
 
     child.on('error', (error) => {
       clearTimeout(timer)

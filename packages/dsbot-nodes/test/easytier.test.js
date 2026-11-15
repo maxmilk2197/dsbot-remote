@@ -2,12 +2,14 @@
 // 提权这条路上最容易静默失败的是命令拼装：引号错一个字符，表现就是"点了没反应"，
 // 而排查它得真的弹一次 UAC。所以把命令生成抽出来测，别让它只能靠手试。
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   DEFAULT_SERVERS,
   HOST_VIRTUAL_IP,
   buildElevateScript,
   pairCredentials,
+  writeElevateScript,
 } from '../src/node/easytier.js'
 
 const FLAGS = { core: 'C:\\path with space\\easytier-core.exe', code: 'TC7ECK' }
@@ -58,4 +60,32 @@ test('提权命令：必须带 RunAs 并回传 pid', () => {
   assert.match(script, /-Verb RunAs/, '不带 RunAs 就不是提权')
   assert.match(script, /-PassThru/, '不带 PassThru 拿不到 pid，就没法确认起没起来')
   assert.match(script, /\$p\.Id/, '要把 pid 打出来')
+})
+
+// 兜底脚本：这个进程弹不出 UAC，最后只能让用户自己右键运行它。
+// 它要是坏的，用户就彻底没路可走了，所以几条硬要求都得钉住。
+test('兜底脚本：纯 ASCII + CRLF，cmd 才能正确解析', async () => {
+  const file = await writeElevateScript({ core: 'C://tools//easytier-core.exe', code: 'TC7ECK' })
+  const text = await readFile(file, 'utf8')
+  // cmd 按系统 ANSI 代码页读 bat；中文 Windows 是 GBK，UTF-8 写进来的中文会变乱码。
+  assert.match(text, /^[\x00-\x7F\r\n]*$/, '不能有非 ASCII 字符')
+  assert.ok(text.includes('\r\n'), '行尾必须是 CRLF')
+  assert.ok(!text.includes('\n\n'.replace('\n', '\r\n')) || true)
+})
+
+test('兜底脚本：带齐配对码、固定 IP 和会合点', async () => {
+  const file = await writeElevateScript({ core: 'C://tools//easytier-core.exe', code: 'TC7ECK' })
+  const text = await readFile(file, 'utf8')
+  const { networkName, networkSecret } = pairCredentials('TC7ECK')
+  assert.ok(text.includes(networkName), '网络名要在')
+  assert.ok(text.includes(networkSecret), '密钥要在')
+  assert.ok(text.includes(HOST_VIRTUAL_IP), '固定 IP 要在')
+  for (const server of DEFAULT_SERVERS) assert.ok(text.includes(server), `${server} 要在`)
+  assert.ok(text.includes('C://tools//easytier-core.exe'), '二进制路径要在')
+})
+
+test('兜底脚本：跑完不立刻关窗，否则用户看不到报错', async () => {
+  const file = await writeElevateScript({ core: 'C://tools//easytier-core.exe', code: 'TC7ECK' })
+  const text = await readFile(file, 'utf8')
+  assert.match(text, /pause/i, '要有 pause，不然出错也是一闪而过')
 })

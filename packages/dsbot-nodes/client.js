@@ -170,6 +170,9 @@ window.__ModuleLoader__.load({
       const [copied, setCopied] = React.useState(false)
       const [joinCode, setJoinCode] = React.useState('')
       const [joinAgent, setJoinAgent] = React.useState('')
+      // 提权失败时后端会给一个 bat 的路径 —— 这个进程弹不出 UAC，
+      // 只能让用户自己右键运行。
+      const [elevateScript, setElevateScript] = React.useState('')
 
       const refresh = async () => {
         try {
@@ -259,12 +262,30 @@ window.__ModuleLoader__.load({
           // 这里只把 EasyTier 单独提起来，点一下、UAC 确认，之后就不用管了。
           net?.needsElevation
             ? h('div', { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
-              button(busy === 'elevate' ? '等你在 UAC 窗口点「是」…' : '用管理员权限启动跨网',
-                () => act('elevate', () => jpost('/elevate')), true),
+              button(busy === 'elevate' ? '正在申请权限…' : '用管理员权限启动跨网',
+                () => act('elevate', async () => {
+                  const result = await jpost('/elevate')
+                  if (typeof result?.script === 'string') setElevateScript(result.script)
+                }), true),
               h('span', { style: { fontSize: 11.5, opacity: 0.55 } },
                 '只提权 EasyTier，不重启 DSH，当前工作不中断'),
             )
             : null,
+          // 兜底提示：DSH 这个进程不在桌面会话里，UAC 窗口弹不出来。
+          // 与其让用户看着"没反应"，不如给一个右键就能跑的脚本。
+          elevateScript === ''
+            ? null
+            : h('div', { style: { marginTop: 8, fontSize: 12, lineHeight: 1.75, opacity: 0.85 } },
+              h('div', {}, '这个进程弹不出权限确认窗口。已经准备好了脚本，右键用管理员身份跑一次就行：'),
+              h('div', {
+                style: {
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontSize: 11.5, wordBreak: 'break-all', margin: '5px 0 4px',
+                  padding: '6px 8px', borderRadius: 6, background: 'rgba(127,127,127,0.12)',
+                },
+              }, elevateScript),
+              h('div', {}, '跑起来之后这一行会自己变成绿色，不用刷新。'),
+            ),
         ], 'code'),
 
         card([

@@ -5,7 +5,7 @@
 // 通关口令（码本身当 token）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
-import { HOST_VIRTUAL_IP, elevateEasyTier, findEasyTier, hasLocalIp, pairCredentials, startEasyTier } from '../../node/easytier.js'
+import { HOST_VIRTUAL_IP, elevateEasyTier, findEasyTier, hasLocalIp, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
 
 export const DEFAULT_PORT = 7777
 
@@ -146,14 +146,18 @@ export function createHosting({
     const found = await findEasyTier().catch(() => undefined)
     if (found === undefined) return { ok: false, error: '没找到 EasyTier' }
 
+    // 兜底脚本先备好，不等提权失败才做 —— 那条路九成走不通（这个进程弹不出 UAC），
+    // 让用户干等 15 秒再告诉他"得自己点"是没道理的。
+    const script = await writeElevateScript({ core: found.core, code }).catch(() => null)
+
     virtual = { ...virtual, on: false, ipv4: null, error: null }
     const raised = await elevateEasyTier({ core: found.core, code })
     if (raised.ok !== true) {
       virtual = { ...virtual, error: raised.error }
-      return raised
+      return { ...raised, ...(script === null ? {} : { script }) }
     }
 
-    // 等网卡真的出现。提权进程是异步起来的，UAC 点完到网卡就绪还有一两秒。
+    // 等网卡真的出现。提权进程是异步起来的，点完确认到网卡就绪还有一两秒。
     const deadline = Date.now() + 30_000
     while (Date.now() < deadline) {
       if (hasLocalIp(ip)) {
@@ -163,9 +167,9 @@ export function createHosting({
       }
       await new Promise(done => setTimeout(done, 500))
     }
-    const error = '提权进程起来了，但 30 秒内没建出网卡（可能被安全软件拦了）'
+    const error = '权限拿到了，但 30 秒内没建出网卡（可能被安全软件拦了）'
     virtual = { ...virtual, on: false, error }
-    return { ok: false, error }
+    return { ok: false, error, ...(script === null ? {} : { script }) }
   }
 
   // 换一把钥匙：旧码立刻作废（监听重开，新码当 token）。
@@ -181,13 +185,18 @@ export function createHosting({
       code: current?.code ?? null,
       port: current?.port ?? null,
       // 跨网这条路的状态：on=true 表示两端进同一个虚拟网了。
-      // error 非空就是起不来，界面要把它显示出来。
+      // 判定以网卡为准，不看内存里的开关 —— EasyTier 可能是插件起的、提权脚本起的、
+      // 或者用户自己开的；只要 10.126.126.1 真的挂在本机，跨网就是通的。
+      // 反过来进程一停网卡就没了，这里会立刻如实变回 false。
       network: {
         ...virtual,
+        on: virtual.on || hasLocalIp(virtual.ipv4 ?? HOST_VIRTUAL_IP.split('/')[0]),
         name: virtual.name ?? (current === null ? null : pairCredentials(current.code).networkName),
-        // 只有"缺管理员权限"这一种失败，设置页才该显示提权按钮 ——
-        // 代理拦截、找不到二进制这些提权也解决不了，给了按钮只会误导。
-        needsElevation: virtual.on !== true && /管理员|Failed to create adapter/i.test(virtual.error ?? ''),
+        // 只要还没通就给按钮 —— 之前只在"缺管理员权限"时给，结果提权一失败
+        // （error 变成别的话）按钮就消失了，用户连重试的机会都没有。
+        // 唯一不给的情况是压根没找到 EasyTier，那提权也救不了。
+        needsElevation: !(virtual.on || hasLocalIp(virtual.ipv4 ?? HOST_VIRTUAL_IP.split('/')[0]))
+          && !/没找到 EasyTier/.test(virtual.error ?? ''),
       },
       // 已经在这个端口上的是哪台机器（给界面直接看）
       online: store.list().filter(node => node.status === 'online').map(node => ({

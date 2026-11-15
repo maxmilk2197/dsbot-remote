@@ -687,7 +687,10 @@ function registerRoutes(rt, api, hosting) {
       // 这里只把 EasyTier 单独提起来，UAC 会弹窗，用户点"是"才成。
       if (req.method === 'POST' && path === '/api/nodes/elevate') {
         const result = await hosting.elevate()
-        return sendJson(res, result.ok === true ? 200 : 400, result)
+        // 一律回 200：失败时也要把兜底脚本路径带到界面。
+        // 用 4xx 的话前端 asJson 会先抛错，那条路径就丢了 —— 用户只会看到
+        // 一个错误弹层，而真正该做的事（右键跑脚本）反而没告诉他。
+        return sendJson(res, 200, result)
       }
       if (req.method === 'GET' && path === '/api/nodes/groups') {
         return sendJson(res, 200, { ok: true, groups: listGroups(rt) })
