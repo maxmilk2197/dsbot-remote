@@ -1,0 +1,8 @@
+# 本文件由 AI 生成，请勿用于生产环境。
+# dsbot-nodes —— 插件自带的挂载声明。
+# profile 只要在 dsh.profile.bundles 里列出本包名即生效，不用手改 profile 的
+# cordis.patch.yml。注意必须写进 insert: —— 顶层的 - id: 是"按 id 覆盖已有条目"，
+# 条目不存在时 loader 只会报 entry "dsbot-nodes" not found 然后跳过。
+- insert:
+    - id: dsbot-nodes
+      name: 'dsbot-nodes'

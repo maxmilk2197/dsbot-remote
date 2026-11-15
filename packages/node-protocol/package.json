@@ -1,0 +1,24 @@
+{
+  "name": "@dsbot/node-protocol",
+  "version": "0.1.0",
+  "description": "DSBot Remote Nodes 线协议：常量、信封、校验、错误码。主机与远程共用的唯一事实来源。 （AI 生成，请勿用于生产环境 / AI-generated, not for production use）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./envelope": "./src/envelope.js",
+    "./errors": "./src/errors.js",
+    "./methods": "./src/methods.js",
+    "./validate": "./src/validate.js",
+    "./version": "./src/version.js",
+    "./endpoints": "./src/endpoints.js",
+    "./tcp": "./src/transport/tcp.js",
+    "./discovery": "./src/transport/discovery.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=30000 \"test/*.test.js\""
+  }
+}

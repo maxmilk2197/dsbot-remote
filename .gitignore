@@ -1,0 +1,13 @@
+# 包内的 node_modules 只是本地开发用的 junction（指向宿主 DSH 的 @deepseek-ai/*）
+node_modules/
+
+# EasyTier 二进制（33MB，按平台下载，不进 git）
+packages/dsbot-remote/vendor/
+**/vendor/easytier/
+
+# 探针、测试与运行的临时产物
+*.log
+.out/
+*.tmp
+nodes.json
+join.log

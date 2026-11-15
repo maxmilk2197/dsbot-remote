@@ -1,0 +1,17 @@
+{
+  "name": "dsbot-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Remote Bot for DS Bot: another computer's Bot joins the group chat, pushes its own files, runs its own commands. （AI 生成，请勿用于生产环境 / AI-generated, not for production use）",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=30000 \"packages/*/test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

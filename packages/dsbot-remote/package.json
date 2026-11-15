@@ -1,0 +1,19 @@
+{
+  "name": "dsbot-remote",
+  "version": "0.1.0",
+  "description": "DSBot Remote Nodes 远程侧：装进远程 DSH，让本机的一只 Bot 以成员身份出现主机的群里。 （AI 生成，请勿用于生产环境 / AI-generated, not for production use）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsbot-remote": "./bin/dsbot-remote.js"
+  },
+  "scripts": {
+    "test": "node --test --test-timeout=30000 \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@dsbot/node-protocol": "workspace:*"
+  }
+}
