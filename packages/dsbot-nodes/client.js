@@ -160,6 +160,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('')
       const [copied, setCopied] = React.useState(false)
       const [joinCode, setJoinCode] = React.useState('')
+      const [joinAgent, setJoinAgent] = React.useState('')
 
       const refresh = async () => {
         try {
@@ -246,9 +247,19 @@ window.__ModuleLoader__.load({
                 fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
               },
             }),
-            button(busy === 'join' ? '连接中…' : '连过去', () => act('join', () => jpost('/join', { code: joinCode })), true),
+            button(busy === 'join' ? '连接中…' : '连过去', () => act('join', () => jpost('/join', { code: joinCode, agent: joinAgent })), true),
             state?.join?.running ? button('断开', () => act('leave', () => jpost('/leave'))) : null,
           ),
+          h('input', {
+            value: joinAgent,
+            onChange: (event) => setJoinAgent(event.target.value),
+            placeholder: '跑一轮用的命令，如 dsh -p（留空则这台只执行文件/命令，不参与对话）',
+            style: {
+              width: '100%', boxSizing: 'border-box', marginTop: 8, padding: '7px 10px',
+              borderRadius: 8, fontSize: 12.5, border: '1px solid var(--border, #d6d8db)',
+              background: 'transparent', color: 'inherit',
+            },
+          }),
           state?.join?.running
             ? h('div', { style: { fontSize: 12, opacity: 0.6, marginTop: 8 } },
               '正在连 ' + state.join.code + (state.join.error ? '（' + state.join.error + '）' : '…'))

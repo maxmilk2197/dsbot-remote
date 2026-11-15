@@ -557,7 +557,19 @@ ${links.join(' ')}`
       const key = `${args.nodeId}\u0000${args.groupId}`
       const running = binding.get(key)
       if (running !== undefined) return running
-      const job = bindNodeToGroup({ rt, store, ...args }).finally(() => binding.delete(key))
+      const job = bindNodeToGroup({ rt, store, ...args })
+        .then((result) => {
+          // 刚进群就把最近的群消息推过去：那台机器上的镜像群是靠这个才建出来的，
+          // 不推的话它要等到群里下一句话才知道自己进来了。
+          const peer = peers.get(args.nodeId)
+          const node = store.node(args.nodeId)
+          if (peer !== undefined && node !== undefined) {
+            void sendRecentLines(peer, node).catch(error =>
+              warn('dsbot-nodes: 推群消息给 %s 失败：%s', args.nodeId, error?.message ?? error))
+          }
+          return result
+        })
+        .finally(() => binding.delete(key))
       binding.set(key, job)
       return job
     },

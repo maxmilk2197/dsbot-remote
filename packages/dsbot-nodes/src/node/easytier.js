@@ -20,8 +20,15 @@ import { delimiter, join } from 'node:path'
 
 export const EASYTIER_DIR = join(homedir(), '.dsbot-remote', 'easytier')
 /** 随包分发的 EasyTier（内置，用户不用另装）。目录按平台分：vendor/easytier/win32-x64/ */
+const VENDOR_PLATFORM = `${process.platform}-${process.arch}`
+// 内置 EasyTier 应该跟着主包走：<dsbot-nodes>/vendor/easytier/<平台-架构>/
 export const VENDORED_DIR = join(
-  import.meta.dirname, '..', 'vendor', 'easytier', `${process.platform}-${process.arch}`,
+  import.meta.dirname, '..', '..', 'vendor', 'easytier', VENDOR_PLATFORM,
+)
+// 老布局：二进制早先是放在 dsbot-remote 包里的（体积大，不进 git，本地放）。
+// 两种都认，免得用户按旧说明摆好了却被告知"没找到 EasyTier"。
+const LEGACY_VENDORED_DIR = join(
+  import.meta.dirname, '..', '..', '..', 'dsbot-remote', 'vendor', 'easytier', VENDOR_PLATFORM,
 )
 export const DEFAULT_SERVERS = []
 export const VIRTUAL_CIDR = '10.126.126.0/24'
@@ -43,6 +50,7 @@ async function executable(path) {
 export async function findEasyTier(extraDirs = []) {
   const dirs = [
     VENDORED_DIR,
+    LEGACY_VENDORED_DIR,
     ...extraDirs,
     EASYTIER_DIR,
     join(homedir(), 'easytier'),
