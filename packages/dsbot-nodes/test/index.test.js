@@ -8,7 +8,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
-import { install } from '../src/host/nodes/index.js'
+import { install, resetInstall } from '../src/host/nodes/index.js'
 
 class FakeLlmAdapter { dispose() {} }
 class FakeLlmError extends Error {
@@ -16,6 +16,9 @@ class FakeLlmError extends Error {
 }
 
 const makeRt = async () => {
+  // install 是模块级单例（一个进程只装一份），每个用例开始前必须重置，
+  // 否则后面所有用例都会拿到第一个用例的 store 和 peers。
+  resetInstall()
   const home = await mkdtemp(join(tmpdir(), 'nodes-'))
   const registered = []
   const rt = {

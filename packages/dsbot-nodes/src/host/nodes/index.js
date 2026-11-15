@@ -67,14 +67,26 @@ bootNote('module imported')
 // 每遍都新建一个 store、抢一次 7777、往 teamTools 里推一份工具、挂一份路由 ——
 // 于是界面有的口读到这份数据、有的口读到那份，表现就是"列表是空的、下拉也是空的"；
 // 更糟的是两份 store 各自写盘，能把节点记录写没。同一个 runtime 只装一次。
-const installed = new WeakMap()
+// 一个进程只装一份。
+//
+// 原来用 WeakMap 按 rt 去重，指望"同一个 runtime 只装一次"—— 实际挡不住：
+// DSH 一次性调了 6 次 apply（不同 ctx / 不同的 rt 包装对象），于是装了 6 份，
+// 6 份都去抢 7777，第一个成功、后面 5 个 EADDRINUSE；6 份 store 各自写盘，
+// 6 份 peers 各管各的连接。界面一会儿有数据一会儿没有，根源就在这。
+//
+// 改成模块级单例：只要这个模块还活着，就只有一份。热重载会换掉整个模块，
+// 那时单例跟着重置，正好是"重新装一份"的正确语义。
+let singleton = null
 
 export function install(rt) {
-  const cached = installed.get(rt)
-  if (cached !== undefined) return cached
-  const api = installOnce(rt)
-  installed.set(rt, api)
-  return api
+  if (singleton !== null) return singleton
+  singleton = installOnce(rt)
+  return singleton
+}
+
+// 测试用：让每个用例都能拿到干净的实例。
+export function resetInstall() {
+  singleton = null
 }
 
 function installOnce(rt) {
