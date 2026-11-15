@@ -222,10 +222,15 @@ function installOnce(rt) {
           caps: Array.isArray(params.caps) ? params.caps : [],
         })
 
-        // 回执里带上它进了哪些群：远端要把"这台机器在哪个群里"显示出来，
-        // 主动说话（node.post）时也得知道往哪个群发。
+        // 回执里只给它**自己进了的**群，不是全部群。
+        // 给全部的话，远端拿第一个就去发消息 —— 发到它根本不在的群里，主机只能拒，
+        // 而那条拒绝以前连日志都没有，看着就是"消息发出去了但群里没有"。
         if (frame.id !== undefined) {
-          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: listGroups(rt) } })
+          const mine = (record.groups ?? [])
+            .map(id => rt.roomOf?.(id))
+            .filter(room => room !== undefined)
+            .map(room => ({ id: room.id, name: room.name || room.id }))
+          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: mine } })
         }
 
         peers.set(nodeId, peer)
@@ -286,10 +291,16 @@ function installOnce(rt) {
   const postFromNode = async (nodeId, frame) => {
     const peer = peers.get(nodeId)
     const answer = payload => { if (frame.id !== undefined) peer?.send({ id: frame.id, ...payload }) }
+    // 被拒也要留痕：之前这里全是静默的 answer({error})，于是"消息发出去了但群里没有"
+    // 只能靠猜。
+    const refuse = (code, message) => {
+      warn('dsbot-nodes: %s 想说话但没成：%s（%s）', nodeId, message, code)
+      answer({ error: { code, message } })
+    }
     const node = store.node(nodeId)
     const bot = node?.botId === undefined ? undefined : rt.botOf?.(node.botId)
     if (bot === undefined) {
-      answer({ error: { code: 'node/not-bound', message: '这台机器还没进任何群' } })
+      refuse('node/not-bound', '这台机器还没进任何群')
       return
     }
     const params = frame.params ?? {}
@@ -299,20 +310,20 @@ function installOnce(rt) {
       ? (node.groups ?? []).map(id => rt.roomOf?.(id)).find(Boolean)
       : rt.roomOf?.(wanted)
     if (room === undefined) {
-      answer({ error: { code: 'node/not-found', message: '没有这个群' } })
+      refuse('node/not-found', `没有这个群：${wanted || '（它不在任何群里）'}`)
       return
     }
     if (!(room.members ?? []).includes(bot.id)) {
-      answer({ error: { code: 'node/denied', message: `这台机器不在「${room.name}」里` } })
+      refuse('node/denied', `这台机器不在「${room.name}」里`)
       return
     }
     const text = String(params.text ?? '').trim()
     if (text === '') {
-      answer({ error: { code: 'node/bad-params', message: '要说什么？' } })
+      refuse('node/bad-params', '要说什么？')
       return
     }
     if (typeof rt.postToRoom !== 'function') {
-      answer({ error: { code: 'node/unsupported', message: '这个版本的 ds-bot 不支持代发' } })
+      refuse('node/unsupported', '这个版本的 ds-bot 不支持代发')
       return
     }
     await rt.postToRoom(room, bot, text)
