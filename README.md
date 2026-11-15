@@ -182,3 +182,17 @@ node packages/dsbot-nodes/probe-turn.mjs
 - [PLAN.md](PLAN.md) —— 文件级改动、阶段、验收
 - [FORK.md](FORK.md) —— 为什么最终不用改 ds-bot 一行
 - [DISCLAIMER.md](DISCLAIMER.md) —— AI 生成声明与使用限制
+
+## EasyTier 二进制没进仓库
+
+`packages/dsbot-remote/vendor/` 里的 EasyTier（约 33MB，按平台各一份）被 `.gitignore` 排除了。它是跨网组网那一步用的，**没有它，局域网内照常工作，跨网不行**。
+
+需要跨网时手动放进去：从 [EasyTier Releases](https://github.com/EasyTier/EasyTier/releases) 下载对应平台的包，解出可执行文件放到
+
+```
+packages/dsbot-remote/vendor/easytier/<platform>/easytier-core
+```
+
+`findEasyTier()` 会按平台找它；找不到就只是不跨网，不会崩。
+
+另外 EasyTier 要建 TUN 设备，**Windows 上需要管理员权限**，这一步本仓库从未验证过（见「成熟度 · 根本没碰」）。
