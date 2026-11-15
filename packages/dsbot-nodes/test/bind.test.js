@@ -179,3 +179,42 @@ test('彻底忘掉一台机器：离开所有群、删 Bot、节点记录消失'
     assert.equal(store.node(node.id), undefined)
   })
 })
+
+// 群里同时站着"手机"和"手机 2"的那次事故：下拉没反馈，用户连点了两下，
+// 两个请求同时读到 node.botId 还是空的，于是各建了一个。
+test('群里已经有指向这台机器的 Bot：复用，不再造第二个', async () => {
+  await withStore(async (store) => {
+    const { rt, state, calls } = fakeTeam({
+      rooms: [{ id: 'g1', name: '测试', members: ['bot-old'] }],
+      bots: [{ id: 'bot-old', name: '手机' }],
+    })
+    const node = await store.add({ name: '手机', deviceId: 'd-1' })
+    // nodes.json 里没记住 botId（被写空过），只能靠 model 认出来。
+    state.bots['bot-old'].model = `node:${node.id}/default`
+
+    const result = await bindNodeToGroup({ rt, store, nodeId: node.id, groupId: 'g1' })
+
+    assert.equal(result.botId, 'bot-old')
+    assert.equal(result.created, false, '复用的，不是新建的')
+    assert.equal(calls.created.length, 0, '不该再建一个新 Bot')
+    assert.deepEqual(state.rooms.g1.members, ['bot-old'], '群里还是一个人')
+    assert.equal(store.node(node.id).botId, 'bot-old', '顺便把 id 记回来')
+  })
+})
+
+test('群里有两个都指着这台机器的 Bot：留登记在案的，另一个收掉', async () => {
+  await withStore(async (store) => {
+    const { rt, state, calls } = fakeTeam({
+      rooms: [{ id: 'g1', name: '测试', members: ['bot-good', 'bot-dup'] }],
+      bots: [{ id: 'bot-good', name: '手机' }, { id: 'bot-dup', name: '手机 2' }],
+    })
+    const node = await store.add({ name: '手机', deviceId: 'd-1', botId: 'bot-good' })
+    state.bots['bot-good'].model = `node:${node.id}/default`
+    state.bots['bot-dup'].model = `node:${node.id}/default`
+
+    await bindNodeToGroup({ rt, store, nodeId: node.id, groupId: 'g1' })
+
+    assert.deepEqual(state.rooms.g1.members, ['bot-good'], '只留登记在案的那个')
+    assert.deepEqual(calls.deleted, ['bot-dup'], '副本要删掉，不能留着占位置')
+  })
+})

@@ -59,8 +59,15 @@ export async function bindNodeToGroup({ rt, store, nodeId, groupId, name, role, 
   }
 
   // 一台机器只代表一个成员：重绑时沿用原来那个 Bot，别在群里多出一个同名的人。
+  // 先看 node 自己记着的那个；记着的丢了（nodes.json 被写空过、旧版本留下的副本），
+  // 再退一步在群里找 model 指向这台机器的 Bot —— 只有后者能认出来"这就是我"。
   const existing = node.botId === undefined ? undefined : rt.botOf(node.botId)
-  const bot = existing ?? await createProxyBot({ rt, name: name ?? node.name, role, avatar })
+  const twin = existing !== undefined
+    ? undefined
+    : (room.members ?? [])
+      .map(id => rt.botOf(id))
+      .find(bot => bot !== undefined && nodeIdOf(String(bot.model ?? '')) === nodeId)
+  const bot = existing ?? twin ?? await createProxyBot({ rt, name: name ?? node.name, role, avatar })
 
   bot.model = proxyModel(nodeId)
   if (cwd !== undefined && cwd !== '') bot.workDir = cwd
@@ -71,6 +78,20 @@ export async function bindNodeToGroup({ rt, store, nodeId, groupId, name, role, 
 
   await rt.updateRoom(groupId, { add: [bot.id] })
 
+  // 历史副本：同一个群里还有别的 Bot 也指着这台机器（并发点击的产物，或者
+  // nodes.json 被写空前后各建过一次）。留现在这个，其余收掉 —— 否则群里会
+  // 同时站着"手机"和"手机 2"，用户根本分不清哪个在干活。
+  for (const memberId of [...(rt.roomOf(groupId)?.members ?? [])]) {
+    if (memberId === bot.id) continue
+    const other = rt.botOf(memberId)
+    if (other === undefined || nodeIdOf(String(other.model ?? '')) !== nodeId) continue
+    await rt.updateRoom(groupId, { remove: [memberId] })
+      .catch(error => rt.warn?.('dsbot-nodes: dropping the duplicate %s failed: %s', other.name, error))
+    await rt.deleteBot?.(memberId)
+      .catch(error => rt.warn?.('dsbot-nodes: deleting the duplicate %s failed: %s', other.name, error))
+    rt.warn?.('dsbot-nodes: 收掉重复的成员 %s（和 %s 指向同一台机器）', other.name, bot.name)
+  }
+
   await store.update(nodeId, {
     botId: bot.id,
     botName: bot.name,
@@ -78,7 +99,7 @@ export async function bindNodeToGroup({ rt, store, nodeId, groupId, name, role, 
   })
   await store.save?.()
 
-  return { botId: bot.id, botName: bot.name, room, created: existing === undefined }
+  return { botId: bot.id, botName: bot.name, room, created: existing === undefined && twin === undefined }
 }
 
 /**

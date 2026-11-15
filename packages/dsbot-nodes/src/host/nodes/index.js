@@ -99,6 +99,7 @@ function installOnce(rt) {
   })
   const peers = new Map()      // nodeId -> peer（一条长活 TCP）
   const waiters = new Map()    // 帧 id -> {resolve, reject, timer}
+  const binding = new Map()    // `${nodeId}\u0000${groupId}` -> 正在跑的 bind
   const listeners = new Map()  // `${nodeId}\u0000${endpoint}` -> Set<handler>
   let counter = 0
 
@@ -364,17 +365,34 @@ ${links.join(' ')}`
     // 必须先等盘读完：store 是懒加载的，list() 在 load 之前返回空数组 ——
     // 那样"已知节点"是空集合，所有代理 Bot 都会被当成孤儿删掉。
     await store.load()
-    const known = new Set(store.list().map(node => node.id))
+    const nodes = store.list()
+    const known = new Set(nodes.map(node => node.id))
+    // node 自己记着的那个 Bot 优先留下：同一个群里如果站着两个都指着这台机器
+    // （并发点击的产物），要留的是登记在案的那个。
+    const preferred = new Map(nodes.filter(node => node.botId !== undefined).map(node => [node.id, node.botId]))
+
     for (const room of Object.values(rt.state?.rooms ?? {})) {
-      for (const memberId of [...(room.members ?? [])]) {
+      const members = [...(room.members ?? [])]
+      const claimed = new Map()   // nodeId -> 这个群里留给它的 botId
+      for (const memberId of members) {
+        const target = nodeIdOf(String(rt.botOf?.(memberId)?.model ?? ''))
+        if (target !== undefined && preferred.get(target) === memberId) claimed.set(target, memberId)
+      }
+      for (const memberId of members) {
         const bot = rt.botOf?.(memberId)
         if (bot === undefined) continue
         const target = nodeIdOf(String(bot.model ?? ''))
-        if (target === undefined || known.has(target)) continue
+        if (target === undefined) continue
+        const why = !known.has(target)
+          ? `节点 ${target} 已经不在了`
+          : claimed.has(target) && claimed.get(target) !== memberId
+            ? `同一台机器在群里已经有 ${rt.botOf?.(claimed.get(target))?.name ?? claimed.get(target)} 了`
+            : undefined
+        if (why === undefined) { claimed.set(target, memberId); continue }
         try {
           await rt.updateRoom?.(room.id, { remove: [memberId] })
           await rt.deleteBot?.(memberId)
-          warn('dsbot-nodes: 清掉孤儿成员 %s（节点 %s 已经不在了）', bot.name ?? memberId, target)
+          warn('dsbot-nodes: 清掉成员 %s（%s）', bot.name ?? memberId, why)
         } catch (error) {
           warn('dsbot-nodes: 清 %s 失败：%s', memberId, error?.message ?? error)
         }
@@ -422,7 +440,16 @@ ${links.join(' ')}`
     call: callNode,
     linkFor,
     store,
-    bind: args => bindNodeToGroup({ rt, store, ...args }),
+    // 两次点击同时进来时，两边都会读到"这台机器还没有 Bot"，于是各建一个 ——
+    // 群里就多出一个"手机 2"。同一台机器同一个群，重复的请求合成一次。
+    bind: args => {
+      const key = `${args.nodeId}\u0000${args.groupId}`
+      const running = binding.get(key)
+      if (running !== undefined) return running
+      const job = bindNodeToGroup({ rt, store, ...args }).finally(() => binding.delete(key))
+      binding.set(key, job)
+      return job
+    },
     unbind: args => unbindNodeFromGroup({ rt, store, ...args }),
     forget: args => forgetNode({ rt, store, ...args }),
     // 配对码：界面与工具共用同一份状态。

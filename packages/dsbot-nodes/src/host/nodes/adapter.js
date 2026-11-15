@@ -20,7 +20,9 @@ const PROMPT_BYTES = 24 * 1024
 
 export const routeOf = nodeId => `${ROUTE_PREFIX}${nodeId}`
 export const isNodeRoute = route => typeof route === 'string' && route.startsWith(ROUTE_PREFIX)
-export const nodeIdOf = route => (isNodeRoute(route) ? route.slice(ROUTE_PREFIX.length) : undefined)
+// `node:<id>` 和 `node:<id>/default`（proxyModel 带上下文后缀）都要能解析出 id，
+// 否则按 model 反查节点永远查不到 —— 群成员表里就会站着两个都指着同一台机器的 Bot。
+export const nodeIdOf = route => (isNodeRoute(route) ? route.slice(ROUTE_PREFIX.length).split('/')[0] : undefined)
 
 // One queue per turn. Events arrive on the link's uplink endpoint and are pushed
 // here; the generator pulls them. Closing resolves a waiter with a terminal
