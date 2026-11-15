@@ -7,6 +7,7 @@ import { findHost } from '@dsbot/node-protocol/discovery'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { parseAgentCommand } from '../../node/agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'
+import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from '../../node/easytier.js'
 import { createMirror } from './mirror.js'
 
 export function createJoiner({ home, rt, warn = () => {} }) {
@@ -14,9 +15,17 @@ export function createJoiner({ home, rt, warn = () => {} }) {
   let info = { running: false, code: null, host: null, since: null, error: null }
   // 手机/另一台机器上的 ds-bot 里也出现这个群，消息双向（见 mirror.js）。
   const mirror = createMirror({ rt, warn })
+  // 跨网用的虚拟网：广播出不了局域网，靠它把两台机器放进同一张网里。
+  let vnet = null
+
+  function stopNetwork() {
+    try { vnet?.stop() } catch {}
+    vnet = null
+  }
 
   function stop() {
     mirror.stop()
+    stopNetwork()
     if (peer !== null) {
       try { peer.close() } catch {}
       peer = null
@@ -34,7 +43,22 @@ export function createJoiner({ home, rt, warn = () => {} }) {
 
     try {
       // 先在局域网里喊一嗓子，谁认这个码谁应。
-      const found = await findHost({ code: clean })
+      let found
+      try {
+        found = await findHost({ code: clean })
+      } catch (broadcastFailed) {
+        // 广播只在同一张局域网里有效。找不到就是"对面不在这张网里"，
+        // 不用让人回去翻参数 —— 直接进虚拟网，按主机的固定地址连。
+        warn('局域网里没找到主机，改走跨网…')
+        const core = await findEasyTier().catch(() => undefined)
+        if (core === undefined) throw broadcastFailed
+        info = { ...info, host: `虚拟网 ${pairCredentials(clean).networkName}` }
+        vnet = startEasyTier({ core: core.core, code: clean, onLog: line => warn(`  [et] ${line}`) })
+        const ready = await vnet.ready
+        const target = HOST_VIRTUAL_IP.split('/')[0]
+        found = { host: target, port: 7777, name: `虚拟网主机（本机 ${ready?.ipv4 ?? '?'}）` }
+        warn(`虚拟网就绪（${ready?.ipv4 ?? '?'}）→ 连 ${target}:7777`)
+      }
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
@@ -56,6 +80,8 @@ export function createJoiner({ home, rt, warn = () => {} }) {
       })
       return { ...info }
     } catch (error) {
+      // 连不上就把虚拟网也撤掉：留着一个没人用的 TUN 只会碍事。
+      stopNetwork()
       info = { ...info, running: false, error: error.message }
       throw error
     }

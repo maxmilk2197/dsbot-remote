@@ -13,7 +13,7 @@ import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { connectTcp, listenTcp } from '@dsbot/node-protocol/tcp'
 import { findHost, listenDiscovery } from '@dsbot/node-protocol/discovery'
-import { findEasyTier, pairCredentials, startEasyTier } from './easytier.js'
+import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from './easytier.js'
 import { ALLOWED_ACTIONS, execute } from './exec.js'
 import { parseAgentCommand, runAgent } from './agent.js'
 
@@ -325,16 +325,22 @@ async function runPair(args) {
   const agent = parseAgentCommand(args.agent)
 
   let network
-  if (args.network === true || args.network === 'true') {
+  // 进虚拟网。配对码就是网络名 + 密钥（见 pairCredentials），所以两端只要码一样
+  // 就一定在同一个网里 —— 这是"跨网只需要一个码"的全部原理。
+  const enterNetwork = async () => {
+    if (network !== undefined) return network
     const found = await findEasyTier()
     if (found === undefined) {
-      fail(`没找到 EasyTier（找过 ${EASYTIER_DIR} 和 PATH）。先装一份，或去掉 --network 走同一局域网。`)
+      fail(`没找到 EasyTier（找过 ${EASYTIER_DIR} 和 PATH）。先装一份，或确认两台机器在同一局域网。`)
     }
     say(`加入虚拟网 ${pairCredentials(code).networkName} …`)
     network = startEasyTier({ core: found.core, code, onLog: line => say(`  [et] ${line}`) })
     const ready = await network.ready
-    say(`虚拟网已就绪${ready.ipv4 ? `（${ready.ipv4}）` : ''}`)
+    say(`虚拟网已就绪${ready.ipv4 ? `（${ready.ipv4}）` : ''}，主机在 ${HOST_VIRTUAL_IP.split('/')[0]}`)
+    return network
   }
+
+  if (args.network === true || args.network === 'true') await enterNetwork()
 
   try {
     let host
@@ -345,7 +351,17 @@ async function runPair(args) {
       say(`直接连 ${host.host}:${host.port}（跳过广播）`)
     } else {
       say(`找配对码 ${code} 的主机…`)
-      host = await findHost({ code, onProbe: address => say(`  询问 ${address}`) })
+      try {
+        host = await findHost({ code, onProbe: address => say(`  询问 ${address}`) })
+      } catch {
+        // UDP 广播出不了局域网：找不到就说明对面不在这张网里（或者广播被防火墙吃了）。
+        // 与其让人回去翻文档加参数，不如直接进虚拟网按主机的固定地址连。
+        say('局域网里没找到，改走跨网…')
+        await enterNetwork()
+        const target = HOST_VIRTUAL_IP.split('/')[0]
+        host = { host: target, port: 7777, name: '虚拟网主机' }
+        say(`走虚拟网找 ${target}:7777`)
+      }
     }
     say(`找到 ${host.name || '主机'} ${host.host}:${host.port}`)
 

@@ -5,11 +5,26 @@
 // 通关口令（码本身当 token）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
+import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from '../../node/easytier.js'
 
 export const DEFAULT_PORT = 7777
 
-export function createHosting({ store, attach, warn = () => {}, hostName = 'DSH 主机' }) {
+export function createHosting({
+  store,
+  attach,
+  warn = () => {},
+  hostName = 'DSH 主机',
+  // 跨网靠它：配对码既当口令又当 EasyTier 的网络名/密钥，两端进同一个虚拟网。
+  // 默认就起 —— 用户要的是"输个码就通"，不该还得自己点一下开。同局域网多这一层
+  // 没坏处；起不来（非管理员建不了 TUN）就退回局域网，不挡监听。
+  network = 'auto',
+}) {
   let current = null
+  // 虚拟网的现状：on 表示进程活着，ipv4 是它在虚拟网里的地址（要告诉对面）。
+  let virtual = { on: false, ipv4: null, name: null, error: null }
+  let vnet = null
+  // 起失败过就别反复试：每次失败都拉一个进程、写一堆日志，没用。
+  let networkTried = null
 
   async function ensureCode() {
     const { code } = await store.host()
@@ -49,10 +64,67 @@ export function createHosting({ store, attach, warn = () => {}, hostName = 'DSH 
     server.server?.unref?.()
     current = { code: chosen, port: server.port, server, discovery }
     warn(`等你来连：配对码 ${chosen}，端口 ${server.port}`)
+    // 虚拟网放在后面异步起：起不来也不能耽误局域网这条道。
+    void startNetwork(chosen)
     return status()
   }
 
+  // 进虚拟网。成了就多一条跨网的路，不成就只剩局域网 —— 都是能用的状态。
+  async function startNetwork(code) {
+    if (network === false || network === 'off') return
+    if (networkTried === code) return
+    networkTried = code
+    virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null }
+
+    const found = await findEasyTier().catch(() => undefined)
+    if (found === undefined) {
+      virtual = { ...virtual, error: '没找到 EasyTier（不在这台机器上，也不在 PATH 里）' }
+      warn('dsbot-nodes: %s —— 跨网连不上，同局域网照常用', virtual.error)
+      return
+    }
+
+    let job
+    try {
+      // 固定地址：远端不必猜主机 DHCP 到了哪，永远连 HOST_VIRTUAL_IP。
+      job = startEasyTier({ core: found.core, code, ipv4: HOST_VIRTUAL_IP })
+    } catch (error) {
+      virtual = { ...virtual, error: `起不来：${error?.message ?? error}` }
+      warn('dsbot-nodes: EasyTier %s', virtual.error)
+      return
+    }
+    vnet = job
+    // 先把进程记在 status 里，界面能看到"正在进虚拟网"；再等它真正就绪。
+    try {
+      const ready = await job.ready
+      if (current === null || current.code !== code) {
+        // 等的这段时间里换了码或者停了：这个进程已经没意义了。
+        try { job.stop() } catch {}
+        return
+      }
+      virtual = { on: true, ipv4: ready?.ipv4 ?? null, name: virtual.name, error: null }
+      warn('dsbot-nodes: 虚拟网已就绪%s —— 对面用同一个码、加 --network 就能跨网连',
+        virtual.ipv4 === null ? '' : `（${virtual.ipv4}）`)
+    } catch (error) {
+      try { job.stop() } catch {}
+      vnet = null
+      const message = String(error?.message ?? error)
+      // 两条原因完全不同，提示也得不同 —— 一句笼统的"没起来"帮不上任何忙。
+      //   1. 建不出虚拟网卡：Windows 上这是没给管理员权限（wintun 要提权）；
+      //   2. 连不上会合点：多半是本机的代理软件接管了流量（TUN/增强模式把
+      //      11010 这种非常规端口塞进了代理，对面根本没收到握手）。
+      const hint = /Failed to create adapter|tun device/i.test(message)
+        ? '要用管理员身份运行 DSH 才能建虚拟网卡'
+        : '连不上会合节点 —— 如果开着代理软件（Clash 等）的 TUN/增强模式，关掉它，或给 39.108.52.138、8.148.29.206 加直连规则'
+      virtual = { ...virtual, on: false, error: `${message}（${hint}）` }
+      warn('dsbot-nodes: 虚拟网没起来：%s。跨网要它；同一个局域网里不受影响', virtual.error)
+    }
+  }
+
   async function stop() {
+    if (current === null && vnet === null) return
+    try { vnet?.stop() } catch {}
+    vnet = null
+    virtual = { on: false, ipv4: null, name: null, error: null }
     if (current === null) return
     try { current.discovery?.close() } catch {}
     try { current.server?.close() } catch {}
@@ -71,6 +143,9 @@ export function createHosting({ store, attach, warn = () => {}, hostName = 'DSH 
       hosting: current !== null,
       code: current?.code ?? null,
       port: current?.port ?? null,
+      // 跨网这条路的状态：on=true 表示两端进同一个虚拟网了。
+      // error 非空就是起不来，界面要把它显示出来（多半是缺管理员权限）。
+      network: { ...virtual, name: virtual.name ?? (current === null ? null : pairCredentials(current.code).networkName) },
       // 已经在这个端口上的是哪台机器（给界面直接看）
       online: store.list().filter(node => node.status === 'online').map(node => ({
         id: node.id, name: node.name, botName: node.botName ?? '',

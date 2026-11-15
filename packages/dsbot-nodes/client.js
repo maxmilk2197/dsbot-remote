@@ -206,6 +206,7 @@ window.__ModuleLoader__.load({
       }
 
       const code = state?.code
+      const net = state?.network
       const nodes = state?.nodes || []
 
       return h('div', { style: { padding: '4px 2px', maxWidth: 640 } },
@@ -232,6 +233,19 @@ window.__ModuleLoader__.load({
             state?.hosting
               ? `正在等连接（端口 ${state.port}）`
               : '没有在监听 —— 端口被占或被防火墙拦了，换一个码再试'),
+          // 跨网这条路单独一行：它在不在，决定了"不在同一个 WiFi 能不能连"。
+          h('div', {
+            style: {
+              fontSize: 12, marginTop: 6, lineHeight: 1.6,
+              color: net?.on ? '#39b54a' : net?.error ? '#c98b1f' : 'inherit',
+              opacity: net?.on || net?.error ? 1 : 0.55,
+            },
+          },
+            net?.on
+              ? `跨网已就绪（${net.ipv4 ?? net.name}）—— 换个网络也能连，对面输码就行`
+              : net?.error
+                ? `跨网没起来：${net.error}（同一个 WiFi 下照常用）`
+                : '正在进虚拟网…'),
         ], 'code'),
 
         card([

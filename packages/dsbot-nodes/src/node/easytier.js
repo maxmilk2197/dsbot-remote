@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { access, constants, readdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 export const EASYTIER_DIR = join(homedir(), '.dsbot-remote', 'easytier')
@@ -30,8 +30,32 @@ export const VENDORED_DIR = join(
 const LEGACY_VENDORED_DIR = join(
   import.meta.dirname, '..', '..', '..', 'dsbot-remote', 'vendor', 'easytier', VENDOR_PLATFORM,
 )
-export const DEFAULT_SERVERS = []
+// 跨网必须有个"会合点"：两端不在同一张局域网时，得先在一个公共节点上互相发现。
+// 不填 -p 的话 EasyTier 谁都不连，两台机器各自建好网卡却永远看不见对方。
+//
+// 官方那个 public.easytier.cn 已经在 2026 年 2 月停服（域名现在是 NXDOMAIN），
+// 网上大量教程还写着它 —— 照抄就是连不上。这里用社区仍在跑的共享节点，并且
+// 一律写 IP 不写域名：域名会被本地代理的 fake-ip 解析成 198.18.x，看着"连上了"
+// 其实根本没出本机。
+export const DEFAULT_SERVERS = [
+  'tcp://39.108.52.138:11010',
+  'tcp://8.148.29.206:11010',
+]
 export const VIRTUAL_CIDR = '10.126.126.0/24'
+// 主机在这个网里占的固定地址。远端走 DHCP 随便拿一个，但连的永远是 .1 ——
+// 否则远端根本不知道该往哪打（虚拟网里没有 UDP 广播，找不到主机）。
+export const HOST_VIRTUAL_IP = '10.126.126.1/24'
+
+// 地址是否真的挂在本机某块网卡上。这是"网卡建出来了"唯一可信的证据 ——
+// EasyTier 会把自己的配置回显到日志，拿日志判断等于自己骗自己。
+export function hasLocalIp(address) {
+  for (const list of Object.values(networkInterfaces())) {
+    for (const entry of list ?? []) {
+      if (entry.address === address) return true
+    }
+  }
+  return false
+}
 
 const isWindows = process.platform === 'win32'
 const CORE_BIN = isWindows ? 'easytier-core.exe' : 'easytier-core'
@@ -96,12 +120,18 @@ export function startEasyTier({
   servers = DEFAULT_SERVERS,
   onLog,
   extraArgs = [],
+  // 主机占一个固定地址，远端就能直接连它，不必知道对方 DHCP 到了哪个 IP。
+  // 留空则走 DHCP（远端用）。
+  ipv4,
+  hostname,
 }) {
   const { networkName, networkSecret } = pairCredentials(code)
   const args = [
-    '-d',
+    // -i 和 -d 是二选一：给了固定地址就别再要 DHCP，两边同时给会打架。
+    ...(typeof ipv4 === 'string' && ipv4 !== '' ? ['-i', ipv4] : ['-d']),
     '--network-name', networkName,
     '--network-secret', networkSecret,
+    ...(typeof hostname === 'string' && hostname !== '' ? ['--hostname', hostname] : []),
     ...(servers.length ? servers.flatMap((server) => ['-p', server]) : []),
     ...extraArgs,
   ]
@@ -119,24 +149,29 @@ export function startEasyTier({
   child.stderr?.on('data', feed)
 
   const ready = new Promise((resolve, reject) => {
+    const expected = typeof ipv4 === 'string' && ipv4 !== '' ? ipv4.split('/')[0] : null
+    let settled = false
+    let probe = null
+
     const timer = setTimeout(() => {
-      reject(Object.assign(new Error('EasyTier 60 秒内没起来（多半是没给管理员权限，TUN 建不出来）'), {
+      fail(Object.assign(new Error('EasyTier 60 秒内没就绪'), {
         code: 'node/network-failed',
         details: output.slice(-2000),
       }))
     }, 60_000)
 
-    let settled = false
-    const done = (ipv4) => {
+    const done = (addr) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ ipv4 })
+      if (probe !== null) clearInterval(probe)
+      resolve({ ipv4: addr })
     }
     const fail = (error) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (probe !== null) clearInterval(probe)
       reject(error)
     }
 
@@ -152,12 +187,35 @@ export function startEasyTier({
       }
     })
 
-    const scan = (text) => {
-      const match = text.match(/ipv4[^\d]{0,8}(\d+\.\d+\.\d+\.\d+)/i) ?? text.match(/(10\.126\.\d+\.\d+)/)
-      if (match) done(match[1])
+    // 以前这里只看日志里有没有 "ipv4 = x.x.x.x"。而 EasyTier 开机会把整份配置
+    // 回显一遍（TOML 段里就有这一行），于是网卡根本没建出来也会被当成"已就绪"。
+    // 实测就是这么骗过自己的。现在只认两条硬证据：
+    //   1. 本机网卡列表里真的出现了这个地址；
+    //   2. 出现的是失败日志 —— 立刻报错，别等 60 秒。
+    if (expected !== null) {
+      probe = setInterval(() => {
+        if (hasLocalIp(expected)) done(expected)
+      }, 400)
+      probe.unref?.()
+    } else {
+      // DHCP 模式给不出确切地址：退一步等它稳下来。远端只需要能路由到主机，
+      // 自己的地址无所谓，所以这里不苛求。
+      setTimeout(() => { if (!settled) done(null) }, 4_000)
     }
-    child.stdout?.on('data', (chunk) => scan(chunk.toString('utf8')))
-    child.stderr?.on('data', (chunk) => scan(chunk.toString('utf8')))
+
+    // tun device error err=rust tun error Failed to create adapter
+    // instance stopped error=...Failed to create adapter
+    const fatal = /Failed to create adapter|tun device error|instance stopped/i
+    const watch = (text) => {
+      if (!fatal.test(text)) return
+      const line = String(text).split('\n').find(each => fatal.test(each)) ?? ''
+      fail(Object.assign(
+        new Error('虚拟网卡建不出来（EasyTier: Failed to create adapter）'),
+        { code: 'node/network-failed', details: line.trim().slice(0, 300) },
+      ))
+    }
+    child.stdout?.on('data', (chunk) => watch(chunk.toString('utf8')))
+    child.stderr?.on('data', (chunk) => watch(chunk.toString('utf8')))
   })
 
   return {
