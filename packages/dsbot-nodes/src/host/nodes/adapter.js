@@ -200,7 +200,10 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
       this.inflight.set(turnId, mailbox)
       const deadlineMs = this.deps.deadlineMs ?? DEFAULT_TURN_DEADLINE_MS
       const deadline = setTimeout(() => mailbox.push({ kind: 'timeout' }), deadlineMs)
-      deadline.unref?.()
+      // 这里**不能** unref：这一轮还没结束，事件循环就没理由空转退出。unref 之后
+      // "等远程回答"这件事就不算 pendding 工作了，Node 会认为没事可做直接退出
+      // （测试里表现为 ERR_TEST_FAILURE: event loop has already resolved）。
+      // 清理在 finally 里，不会拖着进程。
 
       const system = (options.messages ?? [])
         .filter(message => message.role === 'system')

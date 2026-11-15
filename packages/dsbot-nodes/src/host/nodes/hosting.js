@@ -29,7 +29,11 @@ export function createHosting({ store, attach, warn = () => {}, hostName = 'DSH 
       port: wantedPort,
       host: '0.0.0.0',
       token: chosen,
-      onConnection: peer => attach(peer),
+      // 远端连上又立刻断开是家常便饭。这个回调的返回值没人接，任何 rejection
+      // 都会变成宿主的 fatal error，所以这里必须自己兜住。
+      onConnection: peer => {
+        Promise.resolve(attach(peer)).catch(error => warn(`握手没成：${error?.message ?? error}`))
+      },
     })
 
     const discovery = await listenDiscovery({

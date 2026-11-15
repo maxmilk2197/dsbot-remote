@@ -96,3 +96,38 @@ test('连不上的地址会在超时内 reject', async () => {
     (error) => error.code === 'ECONNREFUSED' || error.name === 'BadFrame',
   )
 })
+
+// 一条连接上的 bug 不该升级成"整个应用退出"。
+// tcp.js 的 data / close 监听是跑在 net 的事件循环里的：监听器抛出来的异常会变成
+// uncaughtException，宿主直接没了。这里确认它只上报，管子还能继续用。
+test('帧监听器抛错：只上报 listener-error，连接还能用', async () => {
+  const reported = []
+  const server = await listenTcp({
+    port: 0,
+    host: '127.0.0.1',
+    token: 'boom-token-1',
+    onConnection: (peer) => {
+      peer.on('listener-error', (error) => reported.push(error.message))
+      peer.on('frame', (frame) => {
+        if (frame.method === 'boom') throw new Error('handler boom')
+        peer.send({ id: frame.id, result: { echo: frame.method } })
+      })
+    },
+  })
+  const client = await connectTcp({ url: `tcp://127.0.0.1:${server.port}`, token: 'boom-token-1' })
+  try {
+    const answered = new Promise((resolve) => {
+      client.on('frame', (frame) => { if (frame.id === 'second') resolve(frame) })
+    })
+    client.send({ id: 'first', method: 'boom' })
+    client.send({ id: 'second', method: 'still-alive' })
+
+    const frame = await answered
+    assert.deepEqual(frame.result, { echo: 'still-alive' })
+    assert.deepEqual(reported, ['handler boom'])
+    assert.equal(client.closed, false)
+  } finally {
+    client.close()
+    server.close()
+  }
+})

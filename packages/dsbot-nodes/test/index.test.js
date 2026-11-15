@@ -3,6 +3,7 @@
 // 这里不测 chunk 语义（adapter.test.js 已测），只测"两端对上话"这件事。
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -141,6 +142,77 @@ test('token 不对连不上，什么都不会被记下来', async () => {
   } finally {
     remote.server.close()
     await new Promise(done => setTimeout(done, 30))
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+// ---- 断线不该带走宿主 ----
+// crash-2026-11-15：远端连上 TCP、口令也对，但没发 node.hello 就断了。
+// attach() 的 reject 落在没人 await 的地方，DSH 宿主把它当成 fatal load failure
+// 直接退进程 —— 对方手机切个后台就能把主机上的 DSH 关掉。这两条测试盯住它。
+
+const fakePeer = () => {
+  const peer = new EventEmitter()
+  peer.send = () => true
+  peer.close = () => { peer.closed = true; peer.emit('close') }
+  return peer
+}
+
+test('远端连上又立刻挂掉：握手失败只报一句，宿主不崩', async () => {
+  const { rt, home } = await makeRt()
+  const warnings = []
+  rt.warn = (...args) => warnings.push(args.join(' '))
+  const api = install(rt)
+
+  const unhandled = []
+  const onUnhandled = (error) => unhandled.push(error)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const peer = fakePeer()
+    const pending = api.accept(peer)
+    // 还没等到 node.hello 就断：这就是崩溃日志里那一刻。
+    peer.close()
+    const result = await pending
+    assert.equal(result.nodeId, null)
+    assert.equal(result.failed.code, 'node/offline')
+    assert.equal(api.list().length, 0)
+
+    // 给 unhandledRejection 一个发作的机会。
+    await new Promise(done => setTimeout(done, 30))
+    assert.deepEqual(unhandled, [], '握手失败不能变成未处理的 rejection')
+    assert.match(warnings.join('\n'), /没握上手/)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('握手成功之后再断线：不会补发一次失败', async () => {
+  const { rt, home } = await makeRt()
+  const warnings = []
+  rt.warn = (...args) => warnings.push(args.join(' '))
+  const api = install(rt)
+
+  const unhandled = []
+  const onUnhandled = (error) => unhandled.push(error)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const peer = fakePeer()
+    const pending = api.accept(peer)
+    peer.emit('frame', { method: 'node.hello', params: { name: '写代码那台', deviceId: 'dev-ok' } })
+    // 认下它的同一瞬间断线：close 不能把已经握完的手再拒一次。
+    peer.close()
+
+    const { nodeId } = await pending
+    assert.ok(nodeId, '握完手就该拿到节点 id')
+    await new Promise(done => setTimeout(done, 30))
+
+    assert.deepEqual(unhandled, [], '已经落定的握手不能再 reject 一次')
+    assert.doesNotMatch(warnings.join('\n'), /没握上手/)
+    const node = api.list().find(each => each.id === nodeId)
+    assert.equal(node.status, 'offline', '断线要落成 offline，不是留在 online')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
     await rm(home, { recursive: true, force: true })
   }
 })

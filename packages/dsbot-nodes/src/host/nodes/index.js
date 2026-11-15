@@ -140,8 +140,14 @@ export function install(rt) {
       return callNode(nodeId, method, params)
     },
     send(method, params) {
-      sendFrame(nodeId, { id: nextId(), method, params })
-      return Promise.resolve()
+      // 同步抛要比 reject 危险得多：调用方写的是 `link.send(...).catch(...)`，
+      // 只有 reject 才接得住。节点在轮次中途掉线时 sendFrame 恰好会抛。
+      try {
+        sendFrame(nodeId, { id: nextId(), method, params })
+        return Promise.resolve()
+      } catch (error) {
+        return Promise.reject(error)
+      }
     },
   })
 
@@ -149,58 +155,89 @@ export function install(rt) {
 
   // 握手：对面连上（或我们连上）之后先发一条 `node.hello`，主机记下它是谁。
   // 拿到 hello 之前不认这条连接 —— 一个连上来但不报身份的 socket 没有意义。
+  //
+  // 这里有个坑值得单独说：远端"连上 TCP、口令对、然后没发 hello 就断"是常态
+  // （进程刚起就被杀、网络抖一下、手机上切后台）。主机侧这条路径的通知人是
+  // 监听器的回调，没人会去 await 它 —— 所以必须保证：
+  //   1) 握手成功之后要把 close 监听摘掉，不能留着一个会 reject 的尾巴；
+  //   2) Promise 只能结一次；
+  //   3) reject 出去的错一定要有人接（见 acceptPeer / hosting）。
+  // 少任何一条，一条断线就是一次 fatal load failure（crash-2026-11-15）。
   const attach = (peer, helloTimeoutMs = HELLO_TIMEOUT_MS) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false
+    const settle = (fn, value) => {
+      if (settled) return false
+      settled = true
+      clearTimeout(timer)
       peer.off('frame', onFrame)
+      peer.off('close', onClose)
+      fn(value)
+      return true
+    }
+
+    const timer = setTimeout(() => {
       peer.close()
-      reject(new LlmError('对面连上了但没有发 node.hello', 'node/hello-timeout'))
+      settle(reject, new LlmError('对面连上了但没有发 node.hello', 'node/hello-timeout'))
     }, helloTimeoutMs)
     timer.unref?.()
 
+    const onClose = () => settle(reject, new LlmError('连接在握手前就断了', 'node/offline'))
+
     const onFrame = async (frame) => {
       if (frame?.method !== 'node.hello') return
+      if (settled) return
+      // 先落定再干活：后面每个 await 都可能让这条连接在这期间断掉。
+      settled = true
       clearTimeout(timer)
       peer.off('frame', onFrame)
+      peer.off('close', onClose)
+      try {
+        // 节点 id 由主机分配（store 生成 n-xxxxxxxx），远端只报自己的 deviceId 与名字。
+        // 同一个 deviceId 再连上来是重连，不是新机器。
+        const params = frame.params ?? {}
+        const deviceId = String(params.deviceId ?? '').trim()
+        let record = store.list().find(node => deviceId !== '' && node.deviceId === deviceId)
+        record = record === undefined
+          ? await store.add({ name: String(params.name ?? '') || 'remote', ...(deviceId === '' ? {} : { deviceId }) })
+          : await store.update(record.id, { name: String(params.name ?? record.name) })
+        const nodeId = record.id
+        await store.update(nodeId, {
+          status: 'online',
+          lastSeenAt: Date.now(),
+          caps: Array.isArray(params.caps) ? params.caps : [],
+        })
 
-      // 节点 id 由主机分配（store 生成 n-xxxxxxxx），远端只报自己的 deviceId 与名字。
-      // 同一个 deviceId 再连上来是重连，不是新机器。
-      const params = frame.params ?? {}
-      const deviceId = String(params.deviceId ?? '').trim()
-      let record = store.list().find(node => deviceId !== '' && node.deviceId === deviceId)
-      record = record === undefined
-        ? await store.add({ name: String(params.name ?? '') || 'remote', ...(deviceId === '' ? {} : { deviceId }) })
-        : await store.update(record.id, { name: String(params.name ?? record.name) })
-      const nodeId = record.id
-      await store.update(nodeId, {
-        status: 'online',
-        lastSeenAt: Date.now(),
-        caps: Array.isArray(params.caps) ? params.caps : [],
-      })
+        if (frame.id !== undefined) peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId } })
 
-      if (frame.id !== undefined) peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId } })
-
-      peers.set(nodeId, peer)
-      peer.on('frame', incoming => handleFrame(nodeId, incoming))
-      peer.on('close', () => {
-        if (peers.get(nodeId) !== peer) return
-        peers.delete(nodeId)
-        // 写盘失败不能变成 unhandledRejection：断线时目录可能已经被删了。
-        store.update(nodeId, { status: 'offline', lastSeenAt: Date.now() })
-          .catch(error => warn('dsbot-nodes: marking %s offline failed: %s', nodeId, error))
-        emit(nodeId, 'node.offline', { nodeId })
-      })
-      peer.on('bad-frame', error => warn('dsbot-nodes: %s sent a bad frame: %s', nodeId, error))
-      syncRoutes()
-      emit(nodeId, 'node.online', { nodeId, name: record?.name ?? nodeId })
-      resolve({ nodeId, record })
+        peers.set(nodeId, peer)
+        const drop = () => {
+          if (peers.get(nodeId) !== peer) return
+          peers.delete(nodeId)
+          // 写盘失败不能变成 unhandledRejection：断线时目录可能已经被删了。
+          store.update(nodeId, { status: 'offline', lastSeenAt: Date.now() })
+            .catch(error => warn('dsbot-nodes: marking %s offline failed: %s', nodeId, error))
+          emit(nodeId, 'node.offline', { nodeId })
+        }
+        peer.on('frame', incoming => handleFrame(nodeId, incoming))
+        peer.on('close', drop)
+        peer.on('bad-frame', error => warn('dsbot-nodes: %s sent a bad frame: %s', nodeId, error))
+        peer.on('listener-error', error => warn('dsbot-nodes: %s 的帧处理出错：%s', nodeId, error))
+        syncRoutes()
+        emit(nodeId, 'node.online', { nodeId, name: record?.name ?? nodeId })
+        // 上面几个 await 里对面可能就断了。close 早就发完了，我们的监听挂得太晚 ——
+        // 不补这一刀，这台机器会被记成永远在线。
+        if (peer.closed === true) drop()
+        resolve({ nodeId, record })
+      } catch (error) {
+        // 记不下这台机器就别留着这条连接：半死不活的状态比断开更难查。
+        peer.close()
+        reject(error instanceof LlmError ? error : new LlmError(`认不出这台机器：${error?.message ?? error}`, 'node/failed'))
+      }
     }
 
+    // close 先挂：frame 的注册会同步 flush backlog，可能当场就把 onFrame 跑完。
+    peer.on('close', onClose)
     peer.on('frame', onFrame)
-    peer.on('close', () => {
-      clearTimeout(timer)
-      peer.off('frame', onFrame)
-      reject(new LlmError('连接在握手前就断了', 'node/offline'))
-    })
   })
 
   const connectNode = async ({ url, token, timeoutMs = HELLO_TIMEOUT_MS + 2_000, helloTimeoutMs = HELLO_TIMEOUT_MS } = {}) => {
@@ -211,7 +248,16 @@ export function install(rt) {
   }
 
   // 远端连进来（主机 listen）时用这个：peer 已经由 transport 层验过 token。
-  const acceptPeer = peer => attach(peer)
+  // 这条路（主机监听、界面按钮）没人 await 返回值，reject 一旦漏出去，DSH 宿主会
+  // 当成 fatal load failure 直接退进程 —— 对方手机切个后台就能把主机的 DSH 关掉。
+  // 所以失败在这里压成一句 warn，结果里带 failed 供界面显示。
+  const acceptPeer = peer => attach(peer).then(
+    value => value,
+    error => {
+      warn('dsbot-nodes: 远端没握上手：%s', error?.message ?? error)
+      return { nodeId: null, record: null, failed: error }
+    },
+  )
 
   // ---- 入站帧 ----
 

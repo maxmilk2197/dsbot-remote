@@ -70,13 +70,13 @@ class Peer extends EventEmitter {
       let frames
       try { frames = this.reader.push(chunk) } catch (error) {
         // 坏帧是不可恢复的：这一条连接已经没有可信边界了。
-        this.emit('bad-frame', error)
+        this.safeEmit('bad-frame', error)
         this.close()
         return
       }
       for (const frame of frames) this.deliver(frame)
     })
-    socket.on('error', (error) => this.emit('socket-error', error))
+    socket.on('error', (error) => this.safeEmit('socket-error', error))
     socket.on('close', () => this.finish())
     this.touch()
   }
@@ -108,8 +108,29 @@ class Peer extends EventEmitter {
     this.touch()
     if (frame?.t === 'ping') { this.send({ t: 'pong' }); return }
     if (frame?.t === 'pong') return
-    if (this.gate !== null && this.gate(frame) === false) return
-    this.emit('frame', frame)
+    // 这里是在 socket 的 data 事件里跑的。监听器（gate 也好，上层 handler 也好）
+    // 只要抛一次，异常就会顺着 net 的事件循环一路冒到进程顶层 —— 对宿主来说就是
+    // 一条连接上的一个 bug 直接结束整个应用。连接本身还能用，所以只上报不打断。
+    try {
+      if (this.gate !== null && this.gate(frame) === false) return
+      this.emit('frame', frame)
+    } catch (error) {
+      this.report(error)
+    }
+  }
+
+  // 'listener-error' 是旁路：没有人听就算了，绝不因为它再抛一次。
+  report(error) {
+    try { this.emit('listener-error', error) } catch {}
+  }
+
+  // 在任何"由 socket 事件驱动"的地方发事件都用这个：监听器抛错不外泄。
+  safeEmit(event, ...args) {
+    try {
+      this.emit(event, ...args)
+    } catch (error) {
+      this.report(error)
+    }
   }
 
   send(frame) {
@@ -131,7 +152,14 @@ class Peer extends EventEmitter {
     this.done = true
     this.closed = true
     clearTimeout(this.timer)
-    this.emit('close')
+    // 这条是在 socket 的 close 事件里同步跑的。close 监听器里抛出来的错会变成
+    // uncaughtException —— 宿主只看到"某条连接断了"就把整个进程退掉。断线本该是
+    // 最平常的一件坏事，不能让它带上进程。
+    try {
+      this.emit('close')
+    } catch (error) {
+      this.report(error)
+    }
   }
 }
 
