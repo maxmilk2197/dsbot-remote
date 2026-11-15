@@ -726,27 +726,37 @@ function registerRoutes(rt, api, hosting) {
   }
 
   // webServer 未必已经就位：拿得到就直接挂，拿不到等它出现再挂。
-  const mount = (server) => {
+  //
+  // 这里必须用"此刻仍然有效的那个 context"来建 effect。注入回调拿到的 sub 是
+  // 就绪时刻的 context，而外层 ctx 到那时可能已经被热重载换掉了 —— 在失效的
+  // context 上建 effect 会抛 `cannot create effect on inactive context`，
+  // 它顺着 DSH 的启动流程冒上去，会把整个宿主带崩（crash-2026-11-15T07-24-53）。
+  // 所以：谁给的 context 就用谁的；万一还是失败，只记一句，绝不往外抛。
+  const mount = (scope, server) => {
     if (server?.register === undefined) {
       rt.warn?.('dsbot-nodes: 拿不到 webServer，设置页会连不上')
       return
     }
-    ctx.effect(() => server.register({ kind: 'prefix', path: '/api/nodes', handler }))
+    try {
+      scope.effect(() => server.register({ kind: 'prefix', path: '/api/nodes', handler }))
+    } catch (error) {
+      rt.warn?.(`dsbot-nodes: 设置页接口没挂上（${error?.message ?? error}），不影响跨网和群功能`)
+    }
   }
   const ready = ctx.get?.('webServer') ?? ctx.webServer
   if (ready?.register !== undefined) {
-    mount(ready)
+    mount(ctx, ready)
     return
   }
   if (typeof ctx.inject === 'function') {
     try {
-      ctx.inject(['webServer'], sub => mount(sub.get?.('webServer') ?? sub.webServer))
+      ctx.inject(['webServer'], sub => mount(sub, sub.get?.('webServer') ?? sub.webServer))
       return
     } catch {
       /* 退到下面 */
     }
   }
-  mount(undefined)
+  mount(ctx, undefined)
 }
 
 // 一个工具，多个动作。拆成七个工具会让模型的工具表变长，而这七件事都围绕"哪台机器"。
@@ -871,7 +881,15 @@ export function apply(ctx, config = {}) {
   // "什么都没发生"。改成运行时订阅——先证明插件活着，再等 ds-bot 把 runtime 挂上来。
   ctx.inject(['bot', 'llm'], (sub) => {
     bootNote('deps ready')
-    install(sub.bot)
+    // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
+    // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
+    // effect 会抛 cannot create effect on inactive context，一路冒到 DSH 的
+    // 启动流程，宿主直接判定启动失败（crash-2026-11-15T07-24-53）。
+    try {
+      install(sub.bot)
+    } catch (error) {
+      warnOnce(`dsbot-nodes 装不起来（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
+    }
   })
 }
 

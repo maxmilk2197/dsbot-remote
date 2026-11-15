@@ -72,8 +72,14 @@ export function createHosting({
   // 进虚拟网。成了就多一条跨网的路，不成就只剩局域网 —— 都是能用的状态。
   async function startNetwork(code, port) {
     if (network === false || network === 'off') return
+    // 测试里不起 EasyTier：它是个常驻子进程，会把测试进程一直挂到超时。
+    // 网络这块由 easytier.test.js 单独测参数拼装，不需要真跑。
+    if (process.env.NODE_TEST_CONTEXT !== undefined) return
     if (networkTried === code) return
     networkTried = code
+    // 这两个要先读：virtual 初始化时要记下"本机在哪张网"，后面启动参数也要用。
+    const lan = lanAddress()
+    const subnets = localSubnets()
     virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null, zeroTun: true, lan: lan ?? null, subnets }
 
     const found = await findEasyTier().catch(() => undefined)
@@ -86,8 +92,6 @@ export function createHosting({
     // 零权限模式（默认走这条）：不建虚拟网卡，所以不需要管理员权限。
     // 主机把自己所在的局域网"借"给虚拟网（子网代理），远端连那个地址就行。
     // 代价是主机没有虚拟网卡 —— 判断"通没通"不能再看网卡，得看进程状态。
-    const lan = lanAddress()
-    const subnets = localSubnets()
     let job
     try {
       job = startEasyTier({
@@ -97,7 +101,6 @@ export function createHosting({
         noTun: true,
         // 只代理第一张真实网卡：全代理会把虚拟网自己绕进去，而且多网卡时路由会打架。
         subnetProxy: subnets[0],
-        // 局域网地址编进 hostname，远端从 peer 列表里读出来就知道往哪打。
         // 地址和端口都编进名字：远端从 peer 列表读到就知道该往哪打。
         hostname: lan === undefined ? undefined : hostTag(lan, port),
       })
