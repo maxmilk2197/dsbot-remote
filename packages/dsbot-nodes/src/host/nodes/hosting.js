@@ -5,7 +5,7 @@
 // 通关口令（码本身当 token）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
-import { HOST_VIRTUAL_IP, findEasyTier, pairCredentials, startEasyTier } from '../../node/easytier.js'
+import { HOST_VIRTUAL_IP, elevateEasyTier, findEasyTier, hasLocalIp, pairCredentials, startEasyTier } from '../../node/easytier.js'
 
 export const DEFAULT_PORT = 7777
 
@@ -131,6 +131,43 @@ export function createHosting({
     current = null
   }
 
+  // 用户点「用管理员权限启动」时走这里。
+  // 单独把 EasyTier 提起来，不动 DSH —— 重启整个应用代价太大（正在跑的活全断）。
+  // 提权进程跑在外面，本进程管不了它的生死，只能靠网卡上有没有那个地址判断。
+  async function elevate() {
+    if (current === null) return { ok: false, error: '还没有开始监听，先有个配对码' }
+    const code = current.code
+    const ip = HOST_VIRTUAL_IP.split('/')[0]
+
+    // 普通权限那个实例已经证明建不出网卡了，先收掉，免得两个抢 TUN 名。
+    try { vnet?.stop() } catch {}
+    vnet = null
+
+    const found = await findEasyTier().catch(() => undefined)
+    if (found === undefined) return { ok: false, error: '没找到 EasyTier' }
+
+    virtual = { ...virtual, on: false, ipv4: null, error: null }
+    const raised = await elevateEasyTier({ core: found.core, code })
+    if (raised.ok !== true) {
+      virtual = { ...virtual, error: raised.error }
+      return raised
+    }
+
+    // 等网卡真的出现。提权进程是异步起来的，UAC 点完到网卡就绪还有一两秒。
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      if (hasLocalIp(ip)) {
+        virtual = { on: true, ipv4: ip, name: pairCredentials(code).networkName, error: null }
+        warn('dsbot-nodes: 虚拟网已就绪（管理员权限，%s）—— 对面输同一个码就能跨网连', ip)
+        return { ok: true, ipv4: ip, pid: raised.pid }
+      }
+      await new Promise(done => setTimeout(done, 500))
+    }
+    const error = '提权进程起来了，但 30 秒内没建出网卡（可能被安全软件拦了）'
+    virtual = { ...virtual, on: false, error }
+    return { ok: false, error }
+  }
+
   // 换一把钥匙：旧码立刻作废（监听重开，新码当 token）。
   async function rotate() {
     const code = store.newCode()
@@ -144,8 +181,14 @@ export function createHosting({
       code: current?.code ?? null,
       port: current?.port ?? null,
       // 跨网这条路的状态：on=true 表示两端进同一个虚拟网了。
-      // error 非空就是起不来，界面要把它显示出来（多半是缺管理员权限）。
-      network: { ...virtual, name: virtual.name ?? (current === null ? null : pairCredentials(current.code).networkName) },
+      // error 非空就是起不来，界面要把它显示出来。
+      network: {
+        ...virtual,
+        name: virtual.name ?? (current === null ? null : pairCredentials(current.code).networkName),
+        // 只有"缺管理员权限"这一种失败，设置页才该显示提权按钮 ——
+        // 代理拦截、找不到二进制这些提权也解决不了，给了按钮只会误导。
+        needsElevation: virtual.on !== true && /管理员|Failed to create adapter/i.test(virtual.error ?? ''),
+      },
       // 已经在这个端口上的是哪台机器（给界面直接看）
       online: store.list().filter(node => node.status === 'online').map(node => ({
         id: node.id, name: node.name, botName: node.botName ?? '',
@@ -153,5 +196,5 @@ export function createHosting({
     }
   }
 
-  return { start, stop, rotate, status, ensureCode }
+  return { start, stop, rotate, status, ensureCode, elevate }
 }

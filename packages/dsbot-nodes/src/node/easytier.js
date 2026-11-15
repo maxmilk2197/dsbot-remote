@@ -227,3 +227,74 @@ export function startEasyTier({
     },
   }
 }
+
+/**
+ * 拼出提权启动的 PowerShell 命令。单独抽出来是为了能测 —— 这里的引号转义错
+ * 一个字符，表现就是"点了没反应"，而排查它得真弹一次 UAC 才看得到。
+ */
+export function buildElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
+  const { networkName, networkSecret } = pairCredentials(code)
+  const args = [
+    '-i', HOST_VIRTUAL_IP,
+    '--network-name', networkName,
+    '--network-secret', networkSecret,
+    ...servers.flatMap(server => ['-p', server]),
+  ]
+  // 单引号包一层最省事：这些值都是 hex / dsbot-XXXX / URL，不含单引号。
+  // 万一有，按 PowerShell 的规矩写成两个单引号。
+  const quote = value => `'${String(value).replace(/'/g, "''")}'`
+  return [
+    `$p = Start-Process -FilePath ${quote(core)} -ArgumentList @(${args.map(quote).join(',')}) -Verb RunAs -PassThru`,
+    'if ($p) { $p.Id }',
+  ].join('; ')
+}
+
+/**
+ * 用管理员权限起一条 EasyTier。Windows 会弹 UAC，用户点"是"才继续。
+ * ---------------------------------------------------------------------------
+ * 为什么单独做这一步：建 TUN 网卡要管理员，而 DSH 平时是普通权限启动的。
+ * 让用户"以管理员身份重开 DSH"代价太大（正在干的活全断），所以只在需要跨网时
+ * 单独把 EasyTier 提起来。它是独立进程，跑在 DSH 外面 —— 提权进程没法被普通权限
+ * 的父进程管，所以这里只负责起、不负责停；活着没活着，靠 hasLocalIp 看网卡上
+ * 有没有那个地址。
+ *
+ * @returns {Promise<{ ok: true, pid?: number } | { ok: false, error: string }>}
+ */
+export async function elevateEasyTier({ core, code, servers = DEFAULT_SERVERS }) {
+  const script = buildElevateScript({ core, code, servers })
+  const shellName = isWindows ? 'powershell.exe' : 'sh'
+
+  return await new Promise((resolve) => {
+    const child = spawn(shellName, [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
+    ], { windowsHide: true })
+
+    let out = ''
+    let err = ''
+    child.stdout?.on('data', (chunk) => { out += chunk.toString('utf8') })
+    child.stderr?.on('data', (chunk) => { err += chunk.toString('utf8') })
+
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      resolve({ ok: false, error: '提权超时（UAC 窗口可能还在等你确认）' })
+    }, 90_000)
+
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      resolve({ ok: false, error: `起不来提权进程：${error.message}` })
+    })
+    child.on('exit', (code_) => {
+      clearTimeout(timer)
+      const pid = Number(out.trim())
+      if (code_ === 0 && Number.isFinite(pid) && pid > 0) {
+        resolve({ ok: true, pid })
+        return
+      }
+      // 用户在 UAC 上点了"否"就是这个：报"操作已被用户取消"。
+      const reason = /cancel|取消/i.test(err)
+        ? '你在 UAC 窗口点了「否」'
+        : (err.trim().split('\n')[0] || `退出码 ${code_}`)
+      resolve({ ok: false, error: reason })
+    })
+  })
+}

@@ -15,7 +15,16 @@ window.__ModuleLoader__.load({
 
     const asJson = async (res) => {
       if (res.ok) return res.json()
-      throw new Error('HTTP ' + res.status)
+      // 失败时后端会带一句人能看懂的原因（比如"你在 UAC 窗口点了「否」"），
+      // 别把它丢成 "HTTP 400" —— 那种提示等于什么都没说。
+      let detail = ''
+      try {
+        const body = await res.json()
+        detail = body?.error ?? body?.message ?? ''
+      } catch {
+        /* 不是 JSON 就按状态码说 */
+      }
+      throw new Error(typeof detail === 'string' && detail !== '' ? detail : `HTTP ${res.status}`)
     }
     const jget = async (path) => asJson(await fetch(API + path, { credentials: 'same-origin' }))
     const jpost = async (path, body) => asJson(await fetch(API + path, {
@@ -246,6 +255,16 @@ window.__ModuleLoader__.load({
               : net?.error
                 ? `跨网没起来：${net.error}（同一个 WiFi 下照常用）`
                 : '正在进虚拟网…'),
+          // 建虚拟网卡要管理员权限，但重启整个 DSH 会把正在跑的活全断掉。
+          // 这里只把 EasyTier 单独提起来，点一下、UAC 确认，之后就不用管了。
+          net?.needsElevation
+            ? h('div', { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+              button(busy === 'elevate' ? '等你在 UAC 窗口点「是」…' : '用管理员权限启动跨网',
+                () => act('elevate', () => jpost('/elevate')), true),
+              h('span', { style: { fontSize: 11.5, opacity: 0.55 } },
+                '只提权 EasyTier，不重启 DSH，当前工作不中断'),
+            )
+            : null,
         ], 'code'),
 
         card([

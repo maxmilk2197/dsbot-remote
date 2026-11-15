@@ -683,6 +683,12 @@ function registerRoutes(rt, api, hosting) {
       if (req.method === 'POST' && path === '/api/nodes/rotate') {
         return sendJson(res, 200, { ok: true, ...(await hosting.rotate()) })
       }
+      // 提权：建虚拟网卡要管理员，但重启整个 DSH 代价太大。
+      // 这里只把 EasyTier 单独提起来，UAC 会弹窗，用户点"是"才成。
+      if (req.method === 'POST' && path === '/api/nodes/elevate') {
+        const result = await hosting.elevate()
+        return sendJson(res, result.ok === true ? 200 : 400, result)
+      }
       if (req.method === 'GET' && path === '/api/nodes/groups') {
         return sendJson(res, 200, { ok: true, groups: listGroups(rt) })
       }
