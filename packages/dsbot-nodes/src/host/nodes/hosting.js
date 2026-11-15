@@ -14,10 +14,11 @@ export function createHosting({
   attach,
   warn = () => {},
   hostName = 'DSH 主机',
-  // 跨网靠它：配对码既当口令又当 EasyTier 的网络名/密钥，两端进同一个虚拟网。
-  // 默认就起 —— 用户要的是"输个码就通"，不该还得自己点一下开。同局域网多这一层
-  // 没坏处；起不来（非管理员建不了 TUN）就退回局域网，不挡监听。
-  network = 'auto',
+  // 跨网开关。默认关：EasyTier 是个常驻子进程，一启动就占资源、还要连外部会合点，
+  // 在 DSH 启动阶段跟其它插件的 RPC 抢时间 —— crash-2026-11-15T07-32-19 那次
+  // 就是启动期 MeshCallError: Call deadline exceeded。先把主流程保稳，
+  // 跨网做成用户自己要的时候才开（设置页有开关）。
+  network = false,
 }) {
   let current = null
   // 虚拟网的现状：on 表示进程活着，ipv4 是它在虚拟网里的地址（要告诉对面）。
@@ -85,7 +86,7 @@ export function createHosting({
     const found = await findEasyTier().catch(() => undefined)
     if (found === undefined) {
       virtual = { ...virtual, error: '没找到 EasyTier（不在这台机器上，也不在 PATH 里）' }
-      warn('dsbot-nodes: %s —— 跨网连不上，同局域网照常用', virtual.error)
+      warn(`dsbot-nodes: ${virtual.error} —— 跨网连不上，同局域网照常用`)
       return
     }
 
@@ -106,7 +107,7 @@ export function createHosting({
       })
     } catch (error) {
       virtual = { ...virtual, error: `起不来：${error?.message ?? error}` }
-      warn('dsbot-nodes: EasyTier %s', virtual.error)
+      warn(`dsbot-nodes: EasyTier ${virtual.error}`)
       return
     }
     vnet = job
@@ -120,9 +121,8 @@ export function createHosting({
       }
       virtual = { ...virtual, on: true, ipv4: ready?.ipv4 ?? null, error: null }
       // 零权限模式下没有网卡可看，所以把"对面该连哪"直接写清楚。
-      warn('dsbot-nodes: 跨网已就绪%s —— 对面输同一个配对码就行%s',
-        virtual.lan === null ? '' : `，它要连的是 ${virtual.lan}`,
-        virtual.subnetProxy === undefined ? '' : `（子网代理 ${virtual.subnetProxy}）`)
+      warn(`dsbot-nodes: 跨网已就绪${virtual.lan === null || virtual.lan === undefined ? '' : `，本机在局域网 ${virtual.lan}`}`
+        + `${virtual.subnets?.[0] === undefined ? '' : `（子网代理 ${virtual.subnets[0]}）`} —— 对面输同一个配对码就行`)
     } catch (error) {
       try { job.stop() } catch {}
       vnet = null
@@ -135,7 +135,7 @@ export function createHosting({
         ? '要用管理员身份运行 DSH 才能建虚拟网卡'
         : '连不上会合节点 —— 如果开着代理软件（Clash 等）的 TUN/增强模式，关掉它，或给 39.108.52.138、8.148.29.206 加直连规则'
       virtual = { ...virtual, on: false, error: `${message}（${hint}）` }
-      warn('dsbot-nodes: 虚拟网没起来：%s。跨网要它；同一个局域网里不受影响', virtual.error)
+      warn(`dsbot-nodes: 虚拟网没起来：${virtual.error}。跨网要它；同一个局域网里不受影响`)
     }
   }
 
@@ -148,6 +148,23 @@ export function createHosting({
     try { current.discovery?.close() } catch {}
     try { current.server?.close() } catch {}
     current = null
+  }
+
+  // 用户主动开跨网。默认关着（见 network 参数说明），点了才起 EasyTier。
+  async function enableNetwork() {
+    if (current === null) return { ok: false, error: '还没有开始监听，先有个配对码' }
+    network = 'auto'
+    networkTried = null
+    await startNetwork(current.code, current.port)
+    return { ok: virtual.on === true, ...status().network }
+  }
+
+  async function disableNetwork() {
+    network = false
+    try { vnet?.stop() } catch {}
+    vnet = null
+    virtual = { ...virtual, on: false, ipv4: null, error: null }
+    return { ok: true, ...status().network }
   }
 
   // 用户点「用管理员权限启动」时走这里。
@@ -181,7 +198,7 @@ export function createHosting({
     while (Date.now() < deadline) {
       if (hasLocalIp(ip)) {
         virtual = { on: true, ipv4: ip, name: pairCredentials(code).networkName, error: null }
-        warn('dsbot-nodes: 虚拟网已就绪（管理员权限，%s）—— 对面输同一个码就能跨网连', ip)
+        warn(`dsbot-nodes: 虚拟网已就绪（管理员权限，${ip}）—— 对面输同一个码就能跨网连`)
         return { ok: true, ipv4: ip, pid: raised.pid }
       }
       await new Promise(done => setTimeout(done, 500))
@@ -229,5 +246,5 @@ export function createHosting({
     }
   }
 
-  return { start, stop, rotate, status, ensureCode, elevate }
+  return { start, stop, rotate, status, ensureCode, elevate, enableNetwork, disableNetwork }
 }
