@@ -36,21 +36,48 @@ export function createHosting({
   }
 
   async function start({ code, port } = {}) {
-    await stop()
     const chosen = String(code ?? (await ensureCode())).replace(/[\s-]/g, '').toUpperCase()
     const saved = await store.host()
     const wantedPort = Number(port ?? saved.port ?? DEFAULT_PORT)
+    // 已经在同一个码、同一个端口上等了，就别停了再起。
+    // pair 工具每次被调都会走 start()，之前每次都把 7777 关掉重开：连接断一下，
+    // 还容易撞上旧 server 尚未释放端口的 EADDRINUSE。
+    if (current !== null && current.code === chosen && current.port === wantedPort) {
+      return status()
+    }
+    await stop()
 
-    const server = await listenTcp({
-      port: wantedPort,
-      host: '0.0.0.0',
-      token: chosen,
-      // 远端连上又立刻断开是家常便饭。这个回调的返回值没人接，任何 rejection
-      // 都会变成宿主的 fatal error，所以这里必须自己兜住。
-      onConnection: peer => {
-        Promise.resolve(attach(peer)).catch(error => warn(`握手没成：${error?.message ?? error}`))
-      },
-    })
+    // 热重载时旧实例的 server.close() 可能还没释放端口。给它一点时间，重试几次；
+    // 真被别的程序占着再报一句清楚的话，别让 EADDRINUSE 变成莫名的启动失败。
+    let server
+    let lastError
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        server = await listenTcp({
+          port: wantedPort,
+          host: '0.0.0.0',
+          token: chosen,
+          // 远端连上又立刻断开是家常便饭。这个回调的返回值没人接，任何 rejection
+          // 都会变成宿主的 fatal error，所以这里必须自己兜住。
+          onConnection: peer => {
+            Promise.resolve(attach(peer)).catch(error => warn(`握手没成：${error?.message ?? error}`))
+          },
+        })
+        break
+      } catch (error) {
+        lastError = error
+        if (error?.code !== 'EADDRINUSE' || attempt === 3) break
+        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)))
+      }
+    }
+    if (server === undefined) {
+      if (lastError?.code === 'EADDRINUSE') {
+        throw Object.assign(
+          new Error(`端口 ${wantedPort} 被占用：可能还开着另一个 DSH 实例或旧实例没退干净，只保留一个即可`),
+          { code: 'EADDRINUSE' })
+      }
+      throw lastError
+    }
 
     const discovery = await listenDiscovery({
       code: chosen,

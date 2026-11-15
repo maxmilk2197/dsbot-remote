@@ -33,7 +33,7 @@ try {
 } catch {
   defineTool = definition => definition
 }
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { bindNodeToGroup, forgetNode, unbindNodeFromGroup } from './bind.js'
@@ -43,6 +43,7 @@ import { createNodeStore } from './store.js'
 import { createHosting } from './hosting.js'
 import { createJoiner } from './join.js'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
+import { claimInstance, guardStats, newModuleId, releaseInstance, resetGuard } from './guard.js'
 
 export const name = 'dsbot-nodes'
 export const inject = []
@@ -52,9 +53,14 @@ const CALL_TIMEOUT_MS = 60_000
 
 // 装车自证：三个点各写一行，卡在哪一段一眼就能看出来
 // （模块 import 了没有 / apply 被调了没有 / install 拿没拿到运行时）。
+// 插件的家目录：启动日志、紧急开关都放这儿。
+function botHome() {
+  return process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
+}
+
 function bootNote(text) {
   try {
-    const base = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
+    const base = botHome()
     mkdirSync(base, { recursive: true })
     appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} ${text}
 `)
@@ -66,27 +72,25 @@ bootNote('module imported')
 // DSH 会把同一个插件装进好几个上下文：日志里一次热重载能看到 install 连跑七遍。
 // 每遍都新建一个 store、抢一次 7777、往 teamTools 里推一份工具、挂一份路由 ——
 // 于是界面有的口读到这份数据、有的口读到那份，表现就是"列表是空的、下拉也是空的"；
-// 更糟的是两份 store 各自写盘，能把节点记录写没。同一个 runtime 只装一次。
-// 一个进程只装一份。
+// 更糟的是两份 store 各自写盘，能把节点记录写没。
 //
-// 原来用 WeakMap 按 rt 去重，指望"同一个 runtime 只装一次"—— 实际挡不住：
-// DSH 一次性调了 6 次 apply（不同 ctx / 不同的 rt 包装对象），于是装了 6 份，
-// 6 份都去抢 7777，第一个成功、后面 5 个 EADDRINUSE；6 份 store 各自写盘，
-// 6 份 peers 各管各的连接。界面一会儿有数据一会儿没有，根源就在这。
-//
-// 改成模块级单例：只要这个模块还活着，就只有一份。热重载会换掉整个模块，
-// 那时单例跟着重置，正好是"重新装一份"的正确语义。
-let singleton = null
+// 防多开放在 guard.js：注册表挂在 globalThis，跨模块实例、跨热重载都在。
+// 同一个模块实例被 apply 多次 → 直接复用（拦下，不新建）；
+// 热重载换掉整个模块 → 先拆旧实例再装新的，绝不让两个 7777 监听并存。
+// 模块级变量做不到这件事：热重载会把它连同整个模块换掉，而旧实例开的端口还在。
+const MODULE_ID = newModuleId()
+bootNote(`module loaded (${MODULE_ID})`)
 
 export function install(rt) {
-  if (singleton !== null) return singleton
-  singleton = installOnce(rt)
-  return singleton
+  const claimed = claimInstance(MODULE_ID, () => installOnce(rt), message => bootNote(`guard ${message}`))
+  // 复用时也让这个 runtime 看得到 api：DSH 有些路径读 rt.nodesApi。
+  if (claimed.reused) rt.nodesApi = claimed.api
+  return claimed.api
 }
 
 // 测试用：让每个用例都能拿到干净的实例。
 export function resetInstall() {
-  singleton = null
+  resetGuard()
 }
 
 function installOnce(rt) {
@@ -527,16 +531,20 @@ ${links.join(' ')}`
   // 反过来的那一半：这台机器也可以"加入别人的群"。
   const joiner = createJoiner({ home: rt.home, rt, warn: message => warn(message) })
 
+  // 真正的清理只由 guard 决定何时执行。context 卸载时不能自己直接停：
+  // 热重载里旧 context 的卸载可能晚于新实例就位，一停就把新实例也带走了。
+  const dispose = () => {
+    for (const peer of peers.values()) peer.close()
+    peers.clear()
+    // stop() 里关监听是同步的；返回的 promise 不该变成未处理的 rejection。
+    void hosting.stop().catch?.(() => {})
+    for (const [, waiter] of waiters) clearTimeout(waiter.timer)
+    waiters.clear()
+    adapter.dispose()
+    if (typeof registration === 'function') registration()
+  }
   if (typeof ctx.effect === 'function') {
-    ctx.effect(() => () => {
-      for (const peer of peers.values()) peer.close()
-      peers.clear()
-      void hosting.stop()
-      for (const [, waiter] of waiters) clearTimeout(waiter.timer)
-      waiters.clear()
-      adapter.dispose()
-      if (typeof registration === 'function') registration()
-    })
+    ctx.effect(() => () => releaseInstance(MODULE_ID, message => bootNote(`guard ${message}`)))
   }
 
   // 节点可以用 id 也可以用名字：用户在聊天里说的是"写代码那台"。
@@ -608,7 +616,7 @@ ${links.join(' ')}`
   rt.nodesApi = api
   registerTool(rt, api, resolveNode)
   registerRoutes(rt, api, hosting)
-  return api
+  return { api, dispose }
 }
 
 const sendJson = (res, status, body) => {
@@ -652,10 +660,15 @@ function registerRoutes(rt, api, hosting) {
       // store 是懒加载的，list()/node() 在 load 之前是空的。界面问得太早时，
       // 不能让它看到"一台机器都没有"。
       await api.store?.load?.()
+      if (req.method === 'GET' && path === '/api/nodes/guard') {
+        return sendJson(res, 200, { ok: true, ...guardStats() })
+      }
       if (req.method === 'GET' && path === '/api/nodes/status') {
         return sendJson(res, 200, {
           ok: true,
           ...hosting.status(),
+          // 界面能直接看到"拦下了几次重复加载"，不用翻日志猜。
+          guard: guardStats(),
           nodes: api.list().map(node => ({
             id: node.id,
             name: node.name,
@@ -878,7 +891,10 @@ function registerTool(rt, api, resolveNode) {
     },
   })
   if (viaTeam) {
-    rt.teamTools.push(tool)
+    // 热重载时新模块会再注册一遍；同名工具只留最后一份，别让工具表越攒越长。
+    const at = rt.teamTools.findIndex(each => each?.name === tool.name)
+    if (at >= 0) rt.teamTools[at] = tool
+    else rt.teamTools.push(tool)
     return
   }
   ctx.effect(() => ctx.tools.register(tool))
@@ -887,22 +903,69 @@ function registerTool(rt, api, resolveNode) {
 // 标准 cordis 插件形态：DSH 调的是 apply(ctx)，不是 install(rt)。
 // rt 由 ds-bot 提供（它在 createRuntime 里 ctx.provide('bot', rt)），
 // 所以 inject 里必须声明 'bot'——没有它，我们拿到的是自己那份空运行时。
+// 冷启动先让路：DSH 的 load 阶段有一条带 deadline 的 meshcall 调用，超时就是
+// "fatal load failure"，宿主直接退出。插件在这期间抢服务、开监听、注册 provider，
+// 谁慢一点都可能把那条调用拖过期限。
+//
+// 这几次崩溃都发生在启动后十几秒，紧跟 model listing / cline 目录拉取之后：
+// 那时 llm 服务正忙，install 里的 registerAdapter 正好挤在同一个窗口。把安装挪到
+// 启动完成之后，关键路径上就只剩一次模块 import —— 快，而且不碰任何服务。
+//
+// 排查时可以 DSBOT_NODES_DELAY_MS=0 恢复即时安装。
+const STARTUP_DELAY_MS = 20_000
+
+// 紧急开关：~/.dsh/bot/nodes-off 存在就完全不装。删掉文件、重启即恢复。
+function isDisabled() {
+  try { return existsSync(join(botHome(), 'nodes-off')) } catch { return false }
+}
+
 export function apply(ctx, config = {}) {
-  bootNote('apply called')
+  bootNote(`apply called (${MODULE_ID})`)
+  if (isDisabled()) {
+    bootNote('disabled by nodes-off')
+    return
+  }
+
   // 顶层 inject 里不写 'bot'：服务还没来时 cordis 连 apply 都不调，出问题只能看到
   // "什么都没发生"。改成运行时订阅——先证明插件活着，再等 ds-bot 把 runtime 挂上来。
-  ctx.inject(['bot', 'llm'], (sub) => {
-    bootNote('deps ready')
-    // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
-    // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
-    // effect 会抛 cannot create effect on inactive context，一路冒到 DSH 的
-    // 启动流程，宿主直接判定启动失败（crash-2026-11-15T07-24-53）。
+  const attach = () => {
+    ctx.inject(['bot', 'llm'], (sub) => {
+      bootNote('deps ready')
+      // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
+      // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
+      // effect 会抛 cannot create effect on inactive context，一路冒到 DSH 的
+      // 启动流程，宿主直接判定启动失败（crash-2026-11-15T07-24-53）。
+      try {
+        install(sub.bot)
+      } catch (error) {
+        warnOnce(`dsbot-nodes 装不起来（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
+      }
+    })
+  }
+
+  const delay = Math.max(0, Number(process.env.DSBOT_NODES_DELAY_MS ?? STARTUP_DELAY_MS))
+  if (delay === 0) {
     try {
-      install(sub.bot)
+      attach()
     } catch (error) {
-      warnOnce(`dsbot-nodes 装不起来（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
+      warnOnce(`dsbot-nodes 订阅失败（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
     }
-  })
+    return
+  }
+
+  bootNote(`install deferred ${delay}ms（避开 DSH 启动期）`)
+  const timer = setTimeout(() => {
+    try {
+      attach()
+    } catch (error) {
+      warnOnce(`dsbot-nodes 延迟安装失败（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
+    }
+  }, delay)
+  timer.unref?.()
+  // context 卸载时别留一个孤零零的定时器。
+  try {
+    ctx.effect?.(() => () => clearTimeout(timer))
+  } catch {}
 }
 
 // 插件没接上时给一句话，而不是静默什么都不做。

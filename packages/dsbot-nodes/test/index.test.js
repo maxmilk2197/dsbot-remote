@@ -9,11 +9,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
 import { install, resetInstall } from '../src/host/nodes/index.js'
+import { guardStats } from '../src/host/nodes/guard.js'
 
 class FakeLlmAdapter { dispose() {} }
 class FakeLlmError extends Error {
   constructor(message, code, extra) { super(message); this.code = code; this.extra = extra }
 }
+
+test('防多开：同一进程里多次 install 拿到同一份 api', async () => {
+  const { rt } = await makeRt()
+  const first = install(rt)
+  const second = install(rt)
+  assert.equal(first, second)
+  assert.equal(rt.nodesApi, first)
+  assert.equal(guardStats().blocked, 1)
+})
 
 const makeRt = async () => {
   // install 是模块级单例（一个进程只装一份），每个用例开始前必须重置，
