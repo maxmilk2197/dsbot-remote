@@ -243,9 +243,27 @@ export function createHosting({
 
   // 换一把钥匙：旧码立刻作废（监听重开，新码当 token）。
   async function rotate() {
+    // 换码要把旧监听关掉才能用新 token 重开。万一新码起不来（端口被抢、
+    // 权限变化），界面就会停在"没有在监听"—— 看起来像状态丢了。
+    // 这里记住旧码，失败就退回去，至少保持能用。
+    const previous = current?.code ?? (await store.host()).code
     const code = store.newCode()
     await store.setHost({ code })
-    return await start({ code })
+    try {
+      return await start({ code })
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      if (typeof previous === 'string' && previous !== '') {
+        try {
+          await store.setHost({ code: previous })
+          const restored = await start({ code: previous })
+          return { ...restored, ok: false, error: message, restored: true }
+        } catch {
+          /* 旧码也起不来，走下面如实报错 */
+        }
+      }
+      throw error
+    }
   }
 
   function status() {

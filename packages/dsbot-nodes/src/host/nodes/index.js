@@ -542,6 +542,8 @@ ${links.join(' ')}`
     waiters.clear()
     adapter.dispose()
     if (typeof registration === 'function') registration()
+    const routes = routeState()
+    if (routes.current?.api === api) routes.current = null
   }
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => releaseInstance(MODULE_ID, message => bootNote(`guard ${message}`)))
@@ -649,11 +651,29 @@ const listGroups = (rt) => {
 }
 
 // 设置页读的就是这几个口：状态、换码、绑定、解绑。全走 JSON，不靠 HTML 表单。
+// 路由全进程只挂一次。
+//
+// 热重载换模块时，旧实例挂在 webServer 上的 handler 不会立刻消失；新模块再挂
+// 同一个前缀就会 duplicate prefix route "/api/nodes"，设置页从此读到旧实例的
+// 数据。把"当前实例"放进全局注册表，handler 每次请求现取；挂载只做一次。
+const ROUTE_KEY = Symbol.for('dsbot-nodes.routes/v1')
+
+function routeState() {
+  if (globalThis[ROUTE_KEY] === undefined) {
+    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null }
+  }
+  return globalThis[ROUTE_KEY]
+}
+
 function registerRoutes(rt, api, hosting) {
   const ctx = rt.ctx
-  if (typeof ctx.effect !== 'function') return
+  // 已挂载的 handler 从这里拿"现在是哪一份实例"。
+  routeState().current = { rt, api, hosting }
 
   const handler = async (req, res) => {
+    const current = routeState().current
+    if (current === null) return sendJson(res, 503, { ok: false, error: '插件还没就绪' })
+    const { rt, api, hosting } = current
     const url = new URL(req.url, 'http://localhost')
     const path = url.pathname.replace(/\/+$/, '')
     try {
@@ -757,31 +777,43 @@ function registerRoutes(rt, api, hosting) {
   // context 上建 effect 会抛 `cannot create effect on inactive context`，
   // 它顺着 DSH 的启动流程冒上去，会把整个宿主带崩（crash-2026-11-15T07-24-53）。
   // 所以：谁给的 context 就用谁的；万一还是失败，只记一句，绝不往外抛。
-  const mount = (scope, server) => {
+  const mount = (server) => {
     if (server?.register === undefined) {
       rt.warn?.('dsbot-nodes: 拿不到 webServer，设置页会连不上')
       return
     }
+    const routes = routeState()
+    // 已经挂过了：handler 会现取 current，不需要再挂一份。
+    if (routes.mounted) return
     try {
-      scope.effect(() => server.register({ kind: 'prefix', path: '/api/nodes', handler }))
+      const off = server.register({ kind: 'prefix', path: '/api/nodes', handler })
+      routes.mounted = true
+      routes.unregister = typeof off === 'function' ? off : null
     } catch (error) {
-      rt.warn?.(`dsbot-nodes: 设置页接口没挂上（${error?.message ?? error}），不影响跨网和群功能`)
+      const message = String(error?.message ?? error)
+      if (/duplicate prefix/i.test(message)) {
+        // 旧版本实例的路由还占着这个前缀。不重复挂，也不装作挂上了。
+        routes.mounted = true
+        rt.warn?.('dsbot-nodes: 路由被旧实例占用，这次不重复挂；重启 DSH 后恢复')
+        return
+      }
+      rt.warn?.(`dsbot-nodes: 设置页接口没挂上（${message}），不影响跨网和群功能`)
     }
   }
   const ready = ctx.get?.('webServer') ?? ctx.webServer
   if (ready?.register !== undefined) {
-    mount(ctx, ready)
+    mount(ready)
     return
   }
   if (typeof ctx.inject === 'function') {
     try {
-      ctx.inject(['webServer'], sub => mount(sub, sub.get?.('webServer') ?? sub.webServer))
+      ctx.inject(['webServer'], sub => mount(sub.get?.('webServer') ?? sub.webServer))
       return
     } catch {
       /* 退到下面 */
     }
   }
-  mount(ctx, undefined)
+  mount(undefined)
 }
 
 // 一个工具，多个动作。拆成七个工具会让模型的工具表变长，而这七件事都围绕"哪台机器"。

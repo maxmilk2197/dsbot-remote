@@ -14,12 +14,26 @@
 // apply 又得重建 —— 等于没防住。所以卸载只登记"待释放"，给一段宽限；期间有人
 // 再来认领就取消，真的没人用了才拆。
 
+import { appendFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { threadId } from 'node:worker_threads'
+
+// 临时追踪：同一个 moduleId 却被反复重建，先看清是谁清掉 owner 的。
+function trace(text) {
+  try {
+    const base = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
+    appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} guard-trace ${text} thread=${threadId}\n`)
+  } catch {}
+}
+
 const KEY = Symbol.for('dsbot-nodes.instance/v1')
 const MAX_EVENTS = 12
 const RELEASE_GRACE_MS = 8_000
 
 function state() {
   if (globalThis[KEY] === undefined) {
+    trace('state init')
     globalThis[KEY] = {
       owner: null,
       attempts: 0,
@@ -40,6 +54,7 @@ function note(s, kind, moduleId, extra = {}) {
 }
 
 function detach(s, moduleId, log) {
+  trace(`detach ${moduleId}`)
   const current = s.owner
   if (current === null || current.moduleId !== moduleId) return false
   s.owner = null
@@ -74,6 +89,7 @@ export function guardStats() {
 // build() 只在真要新建实例时调用，返回 { api, dispose }。
 export function claimInstance(moduleId, build, log = () => {}) {
   const s = state()
+  trace(`claim owner=${s.owner === null ? 'null' : s.owner.moduleId} attempts=${s.attempts} blocked=${s.blocked}`)
   s.attempts += 1
 
   // 有人又来认领了：撤销上一次卸载留下的待释放计时。
@@ -142,6 +158,7 @@ export function flushPendingRelease(log = () => {}) {
 }
 
 export function resetGuard({ dispose = true } = {}) {
+  trace(`resetGuard caller=${(new Error().stack ?? '').split('\n')[2]?.trim() ?? '?'}`)
   const s = state()
   if (s.releaseTimer !== null) {
     clearTimeout(s.releaseTimer)
