@@ -17,6 +17,16 @@ export const ERROR_CODES = Object.freeze({
   'node/unknown-method': { message: '未知方法', retry: false, terminal: false },
   'node/bad-params': { message: '参数不合法', retry: false, terminal: false },
   'node/cancelled': { message: '本轮已被取消', retry: false, terminal: false },
+  // 下面这些是收发两端实际在用的码，之前只在代码里出现、不在表里：
+  // 客户端拿 isKnownCode() 判就会当成"未知错误"直接放弃。
+  'node/unsupported': { message: '这台机器还不支持这个操作', retry: false, terminal: false },
+  'node/invalid-params': { message: '参数形状不对', retry: false, terminal: false },
+  'node/denied': { message: '主机没有授权这个操作', retry: false, terminal: false },
+  'node/not-bound': { message: '这台机器还没进任何群', retry: false, terminal: false },
+  'node/not-found': { message: '找不到这台机器或这个群', retry: false, terminal: false },
+  'node/starting': { message: '主机还在启动，稍等一下', retry: true, terminal: false },
+  'node/agent-failed': { message: '本机 agent 跑挂了', retry: true, terminal: false },
+  'node/hello-timeout': { message: '对面连上了但没报身份', retry: true, terminal: true },
 })
 
 export class NodeFailure extends Error {
