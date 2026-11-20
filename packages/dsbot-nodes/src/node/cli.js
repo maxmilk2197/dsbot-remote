@@ -5,6 +5,7 @@
 //
 // 跑起来之后它就是一个"节点"：报身份、接主机发来的 node.exec、把结果发回去。
 // 群里的发言不在这里 —— 那是主机拿这一轮 turn 的输出写进去的，见 README。
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import net from 'node:net'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -14,9 +15,20 @@ import { pathToFileURL } from 'node:url'
 import { connectTcp, listenTcp } from '@dsbot/node-protocol/tcp'
 import { findHost, listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { findEasyTier, hostVirtualIp, pairCredentials, startEasyTier } from './easytier.js'
+import { ensureEasyTier } from './easytier-fetch.js'
 import { ALLOWED_ACTIONS, execute, withinRoot } from './exec.js'
 import { parseAgentCommand, runAgent } from './agent.js'
 import { runLocal } from './local-agent.js'
+
+// 本机装过 DSH 的话，"配对完就能让模型说话"是开箱即用的底线：
+// 不填 --agent 就用本机的 `dsh -p` 当 agent。
+const hasCommand = (name) => {
+  try {
+    return spawnSync(platform() === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' }).status === 0
+  } catch {
+    return false
+  }
+}
 
 const HOME = join(homedir(), '.dsbot-remote')
 const CAPS = ['exec', 'push_file']
@@ -31,7 +43,7 @@ listen    等主机来连（主线；会给出一个配对码）
   --name <名字>      群里显示的名字，默认主机名
   --cwd <目录>       run_shell 与相对路径的根，默认当前目录
   --agent "<命令>"   跑 turn 用的命令，prompt 走 stdin、回答取 stdout
-                     例：--agent "dsh -p"   或   --agent "claude -p"
+                     默认：本机装了 dsh 就用 "dsh -p"，装 claude 就写 --agent "claude -p"
 
 pair      输入配对码接上主机（日常只需要这条）
   --code <码>        6 位配对码，必需
@@ -434,7 +446,7 @@ async function startListen(args) {
   const name = typeof args.name === 'string' ? args.name : hostname()
   const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd()
   const deviceId = await deviceIdentity(name)
-  const agent = parseAgentCommand(args.agent)
+  const agent = parseAgentCommand(args.agent) ?? (hasCommand('dsh') ? { command: 'dsh', args: ['-p'] } : undefined)
 
   const server = await listenTcp({
     port: Number(args.port ?? 7777),
@@ -456,7 +468,7 @@ async function startListen(args) {
   }
 
   say(`监听 ${args.host ?? '0.0.0.0'}:${server.port}`)
-  say(`我是 ${name}（${deviceId}），能做：${ALLOWED_ACTIONS.join('/')}${agent === undefined ? '（没配 --agent，跑不了 turn）' : `，turn 用：${agent.command} ${agent.args.join(' ')}`}`)
+  say(`我是 ${name}（${deviceId}），能做：${ALLOWED_ACTIONS.join('/')}${agent === undefined ? '（没配 --agent，也找不到 dsh：能读文件、执行命令、发言，但没人替它说话）' : `，turn 用：${agent.command} ${agent.args.join(' ')}`}`)
   say(`工作目录 ${cwd}`)
 
   const stop = () => {
@@ -481,16 +493,25 @@ async function runPair(args) {
   const name = typeof args.name === 'string' ? args.name : hostname()
   const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd()
   const deviceId = await deviceIdentity(name)
-  const agent = parseAgentCommand(args.agent)
+  const agent = parseAgentCommand(args.agent) ?? (hasCommand('dsh') ? { command: 'dsh', args: ['-p'] } : undefined)
 
   let network
   // 进虚拟网。配对码就是网络名 + 密钥（见 pairCredentials），所以两端只要码一样
   // 就一定在同一个网里 —— 这是"跨网只需要一个码"的全部原理。
   const enterNetwork = async () => {
     if (network !== undefined) return network
-    const found = await findEasyTier()
+    let found = await findEasyTier()
     if (found === undefined) {
-      fail(`没找到 EasyTier（找过 ~/.dsh/bot/easytier 和 PATH）。先装一份，或确认两台机器在同一局域网。`)
+      say('本机还没有 EasyTier，先下载一份（只下一次，之后走缓存）…')
+      try {
+        await ensureEasyTier({ onLog: line => say(`  [et] ${line}`) })
+      } catch (error) {
+        fail(`EasyTier 下载失败：${error?.message ?? error}。也可以手动装一份放进 ~/.dsh/bot/easytier，或者确认两台机器在同一局域网（那样不需要虚拟网）。`)
+      }
+      found = await findEasyTier()
+      if (found === undefined) {
+        fail('EasyTier 下完了但没找到可执行文件，检查 ~/.dsh/bot/easytier 下的目录结构。')
+      }
     }
     say(`加入虚拟网 ${pairCredentials(code).networkName} …`)
     network = startEasyTier({ core: found.core, code, onLog: line => say(`  [et] ${line}`) })
@@ -526,6 +547,8 @@ async function runPair(args) {
 
     const peer = await connectTcp({ url: `tcp://${host.host}:${host.port}`, token: code })
     say('已连上')
+    // 断线不要让人去猜：同一条命令再跑一次就是重连，配对码不变。
+    peer.on('close', () => say('连接断了。同一条命令再跑一次就重连（配对码不变）。'))
     servePeer(peer, { name, deviceId, cwd, agent })
 
     const stop = () => {
