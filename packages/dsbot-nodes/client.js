@@ -521,7 +521,7 @@ window.__ModuleLoader__.load({
         try {
           // 群列表跟着 /status 一起回来：少一个"另一个口挂了整页空白"的失败点。
           // 配对码默认不随状态下发，设置页要显示就必须显式要。
-      const status = await jget('/status?reveal=1')
+          const status = await jget('/status?reveal=1')
           setState(status)
           setGroups(status.groups || [])
           setError('')
@@ -659,7 +659,7 @@ window.__ModuleLoader__.load({
                 Button({ children: '选群组和文件夹', onClick: () => setDialog(true) }),
                 note(join.error ? join.error : ''),
               ]),
-              ChatBox({ join, act }),
+              h(ChatBox, { join, act }),
             ])
             : join?.error
               ? note(join.error)
