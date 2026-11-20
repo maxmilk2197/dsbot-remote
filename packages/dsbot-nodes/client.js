@@ -509,7 +509,8 @@ window.__ModuleLoader__.load({
       const refresh = React.useCallback(async () => {
         try {
           // 群列表跟着 /status 一起回来：少一个"另一个口挂了整页空白"的失败点。
-          const status = await jget('/status')
+          // 配对码默认不随状态下发，设置页要显示就必须显式要。
+      const status = await jget('/status?reveal=1')
           setState(status)
           setGroups(status.groups || [])
           setError('')
@@ -623,7 +624,7 @@ window.__ModuleLoader__.load({
             Button({
               variant: 'primary',
               children: busy === 'join' ? '连接中…' : '连过去',
-              onClick: () => act('join', () => jpost('/join', { code: joinCode, agent: joinAgent })),
+              onClick: () => act('join', () => jpost('/join', { code: joinCode, agent: joinAgent, confirm: true })),
             }),
             join?.running
               ? Button({ children: busy === 'leave' ? '断开中…' : '断开', onClick: () => act('leave', () => jpost('/leave')) })

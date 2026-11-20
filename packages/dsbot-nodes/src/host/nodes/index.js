@@ -945,6 +945,68 @@ function routeState() {
   return globalThis[ROUTE_KEY]
 }
 
+// 设置页是本机页面，但路由挂在 DSH 的 web server 上：任何网页都能对着
+// 127.0.0.1:56519 发一个 no-cors 的 POST，浏览器不拦。入口先挡掉"不是本机
+// 页面自己发的"请求：
+//   1. Host 必须是 IP 字面量或 localhost —— DNS rebinding 的域名到这里就断；
+//   2. 有 Origin 就必须和 Host 同源；
+//   3. Sec-Fetch-Site 只允许 same-origin / none；
+//   4. POST 必须是 application/json —— 跨站简单请求只能是 text/plain、
+//      form-urlencoded、multipart，一律 415。
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/
+const EXTRA_HOSTS = new Set(
+  String(process.env.DSBOT_NODES_HOSTS ?? '')
+    .split(',')
+    .map(each => each.trim().toLowerCase())
+    .filter(each => each !== ''),
+)
+
+function hostNameOf(header) {
+  const raw = String(header ?? '').trim().toLowerCase()
+  if (raw === '') return ''
+  if (raw.startsWith('[')) {
+    const end = raw.indexOf(']')
+    return end === -1 ? raw : raw.slice(0, end + 1)
+  }
+  return raw.split(':')[0]
+}
+
+const refuseWith = reason => ({ status: 403, error: '这个请求不像本机设置页发的（' + reason + '）' })
+
+// null = 放行；否则返回要回给浏览器的状态码和原因。
+function crossSiteReason(req) {
+  const host = hostNameOf(req.headers.host)
+  if (host === '') return refuseWith('缺 Host')
+  const local = host === 'localhost' || host === '[::1]' || host === '::1' || IPV4.test(host)
+  if (!local && !EXTRA_HOSTS.has(host)) return refuseWith('Host ' + host)
+  const origin = req.headers.origin
+  if (typeof origin === 'string' && origin !== '') {
+    if (origin === 'null') {
+      // 桌面壳从 file:// 或 app:// 里加载设置页时，浏览器只会发 Origin: null。
+      // 那种环境默认放行会连 CSRF 一起放进来，所以留一个显式开关。
+      if (process.env.DSBOT_NODES_ALLOW_NULL_ORIGIN !== '1') return refuseWith('Origin 是 null')
+    }
+    let originHost = ''
+    try {
+      originHost = new URL(origin).host.toLowerCase()
+    } catch {
+      return refuseWith('Origin 读不出来')
+    }
+    if (originHost !== String(req.headers.host ?? '').toLowerCase()) {
+      return refuseWith('Origin ' + originHost + ' 和 Host 不是同一个')
+    }
+  }
+  const site = req.headers['sec-fetch-site']
+  if (typeof site === 'string' && site !== '' && site !== 'same-origin' && site !== 'none') {
+    return refuseWith('Sec-Fetch-Site ' + site)
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const type = String(req.headers['content-type'] ?? '').toLowerCase()
+    if (!type.startsWith('application/json')) return { status: 415, error: 'POST 只收 application/json' }
+  }
+  return null
+}
+
 function registerRoutes(rt, api, hosting) {
   const ctx = rt.ctx
   // 已挂载的 handler 从这里拿"现在是哪一份实例"。
@@ -956,6 +1018,10 @@ function registerRoutes(rt, api, hosting) {
     const { rt, api, hosting } = current
     const url = new URL(req.url, 'http://localhost')
     const path = url.pathname.replace(/\/+$/, '')
+    const crossSite = crossSiteReason(req)
+    if (crossSite !== null) {
+      return sendJson(res, crossSite.status, { ok: false, error: crossSite.error })
+    }
     try {
       // store 是懒加载的，list()/node() 在 load 之前是空的。界面问得太早时，
       // 不能让它看到"一台机器都没有"。
@@ -964,9 +1030,19 @@ function registerRoutes(rt, api, hosting) {
         return sendJson(res, 200, { ok: true, ...guardStats() })
       }
       if (req.method === 'GET' && path === '/api/nodes/status') {
+        const state = { ...hosting.status() }
+        // 配对码就是网络名和网络密钥的全部种子（pairCredentials 只拿它做 sha256），
+        // 所以默认不下发：设置页显式要 ?reveal=1 才给。
+        if (state.code !== undefined) {
+          if (url.searchParams.get('reveal') === '1') state.codeVisible = true
+          else {
+            delete state.code
+            state.codeHidden = true
+          }
+        }
         return sendJson(res, 200, {
           ok: true,
-          ...hosting.status(),
+          ...state,
           // 界面能直接看到"拦下了几次重复加载"，不用翻日志猜。
           guard: guardStats(),
           nodes: api.list().map(node => ({
@@ -1002,10 +1078,18 @@ function registerRoutes(rt, api, hosting) {
       }
       if (req.method === 'POST' && path === '/api/nodes/join') {
         const body = await readBody(req)
+        // body.agent 会变成这台机器上的一条 shell 命令（parseAgentCommand → spawn）。
+        // 同源检查挡住了网页，这一条再挡"本机别的东西顺手 POST 一下"。
+        const agent = body.agent === undefined || body.agent === null ? '' : String(body.agent).trim()
+        if (agent !== '' && body.confirm !== true) {
+          return sendJson(res, 403, { ok: false, error: '带 agent 命令的加入需要 confirm: true' })
+        }
+        if (agent.length > 200) return sendJson(res, 400, { ok: false, error: 'agent 命令太长' })
+        const cwd = body.cwd === undefined || body.cwd === null ? undefined : String(body.cwd).slice(0, 400)
         return sendJson(res, 200, {
           ok: true,
           join: await api.join({
-            code: body.code, name: body.name, agent: body.agent, cwd: body.cwd,
+            code: body.code, name: body.name, agent, cwd,
             groups: body.groups,
           }),
         })
