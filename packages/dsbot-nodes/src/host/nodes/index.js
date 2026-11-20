@@ -310,6 +310,13 @@ function installOnce(rt) {
           })
         }
 
+        // 同一个节点重连：旧连接必须断掉。留着它，两边的帧都会进来，
+        // 而回包按 peers.get 走新连接 —— 旧连接上的请求永远等不到回音。
+        const previous = peers.get(nodeId)
+        if (previous !== undefined && previous !== peer) {
+          warn('dsbot-nodes: %s 换了一条新连接，旧的断开', nodeId)
+          try { previous.close() } catch {}
+        }
         peers.set(nodeId, peer)
         peer.lastFrameAt = Date.now()
         const drop = () => {
