@@ -332,9 +332,19 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
 
     if (frame.method === 'node.exec') {
       const action = frame.params?.action
-      say(`执行 ${action}${frame.params?.args?.path ? ` ${frame.params.args.path}` : ''}`)
+      // 白名单在这里再挡一次：execute 的 switch 有 default 分支，不挡的话
+      // 不认识的 action 会落进 env_info 被当成成功回执。
+      if (!ALLOWED_ACTIONS.includes(action)) {
+        // 未知动作回"这次调用失败"，不是"协议坏了"：用 rpc.response 带 ok:false，
+        // 主机那边的工具能原样把原因说出来，而不是整条连接抛一个异常。
+        if (frame.id !== undefined) {
+          peer.send({ id: frame.id, type: 'rpc.response', result: { ok: false, code: 'node/exec-denied', message: '不认识的 action：' + String(action ?? '（空）') } })
+        }
+        return
+      }
+      say('执行 ' + action + (frame.params?.args?.path ? ' ' + frame.params.args.path : ''))
       const result = await execute(frame.params, { cwd })
-      if (frame.id !== undefined) peer.send({ id: frame.id, result })
+      if (frame.id !== undefined) peer.send({ id: frame.id, type: 'rpc.response', result })
       return
     }
 
