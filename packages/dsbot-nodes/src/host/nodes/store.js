@@ -11,7 +11,9 @@ import { NodeFailure } from '@dsbot/node-protocol/errors'
 
 // No 0/O/1/I/L: a code is read off a screen and typed on another machine.
 const ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
-const CODE_LENGTH = 6
+// 8 位：6 位只有约 30 bit，配上"每 60 秒错 5 次就关小黑屋"之外还嫌薄；
+// 8 位约 40 bit，手输仍然是 8 个字符，感知成本几乎为零。
+const CODE_LENGTH = 8
 const PAIRING_TTL_MS = 10 * 60_000
 
 export const hashToken = token => createHash('sha256').update(String(token ?? '')).digest('hex')

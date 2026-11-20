@@ -33,7 +33,7 @@ test('配对码：开一次，redeem 一次，第二次就不认了', async () =
   const store = storeAt(root)
   await store.load()
   const pairing = await store.openPairing({ botId: 'b-1', groupId: 'g-1' })
-  assert.match(pairing.code, /^[2-9A-HJKMNP-Z]{6}$/)
+  assert.match(pairing.code, /^[2-9A-HJKMNP-Z]{8}$/)
 
   const redeemed = await store.redeemPairing(pairing.code, { deviceId: 'd-1' })
   assert.equal(redeemed.botId, 'b-1')
