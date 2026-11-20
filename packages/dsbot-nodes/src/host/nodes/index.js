@@ -1256,7 +1256,23 @@ function registerTool(rt, api, resolveNode) {
           const command = String(args.command ?? '').trim()
           const allowed = ['read_file', 'list_dir', 'run_shell', 'env_info', 'push_file']
           if (!allowed.includes(command)) return `exec 只做 ${allowed.join(' / ')}，不做 ${command || '（空）'}`
-          const params = { command, path: args.path, cwd: args.cwd, content: args.content, text: args.text, to: args.to }
+          // IPC 那条路的形状是 { execId, action, args }（见 /api/nodes/fs）。
+          // 这里以前把工具参数平铺发过去，exec.js 读 request.action 拿到 undefined，
+          // 于是每次工具调用都回 'node/exec-denied：（undefined）不在白名单里'。
+          const params = {
+            execId: 'exec-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+            action: command,
+            args: {
+              path: args.path,
+              cwd: args.cwd,
+              content: args.content,
+              text: args.text,
+              to: args.to,
+              // run_shell 读的是 args.command；工具参数里 command 已被动作名占用，
+              // 真正的命令行来自 text（兼容 shell / script 两个别名）。
+              command: args.text ?? args.shell ?? args.script,
+            },
+          }
           const result = await api.call(node.id, 'node.exec', params, { timeoutMs: 35_000 })
           const parts = [result.ok === false ? `失败：${result.message ?? result.code}` : '成功']
           if (result.output !== undefined) parts.push(String(result.output))
