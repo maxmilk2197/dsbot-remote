@@ -108,7 +108,7 @@ export function createHosting({
     if (network === false || network === 'off') return
     // 测试里不起 EasyTier：它是个常驻子进程，会把测试进程一直挂到超时。
     // 网络这块由 easytier.test.js 单独测参数拼装，不需要真跑。
-    if (process.env.NODE_TEST_CONTEXT !== undefined) return
+    if (process.env.DSBOT_NODES_TEST === '1') return
     if (networkTried === code) return
     networkTried = code
     // 这两个要先读：virtual 初始化时要记下"本机在哪张网"，后面启动参数也要用。
@@ -116,9 +116,16 @@ export function createHosting({
     const subnets = localSubnets()
     virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null, zeroTun: true, lan: lan ?? null, subnets }
 
-    const found = await findEasyTier().catch(() => undefined)
+    let found
+    try {
+      found = await findEasyTier([], { onLog: line => warn(`dsbot-nodes: ${line}`) })
+    } catch (error) {
+      virtual = { ...virtual, error: `EasyTier 下载失败：${error?.message ?? error}` }
+      warn(`dsbot-nodes: ${virtual.error} —— 跨网连不上，同局域网照常用`)
+      return
+    }
     if (found === undefined) {
-      virtual = { ...virtual, error: '没找到 EasyTier（不在这台机器上，也不在 PATH 里）' }
+      virtual = { ...virtual, error: '没找到 EasyTier，自动下载也没成功' }
       warn(`dsbot-nodes: ${virtual.error} —— 跨网连不上，同局域网照常用`)
       return
     }
@@ -212,8 +219,8 @@ export function createHosting({
     try { vnet?.stop() } catch {}
     vnet = null
 
-    const found = await findEasyTier().catch(() => undefined)
-    if (found === undefined) return { ok: false, error: '没找到 EasyTier' }
+    const found = await findEasyTier([], { onLog: line => warn(`dsbot-nodes: ${line}`) }).catch(() => undefined)
+    if (found === undefined) return { ok: false, error: '没找到 EasyTier，自动下载也没成功' }
 
     // 兜底脚本先备好，不等提权失败才做 —— 那条路九成走不通（这个进程弹不出 UAC），
     // 让用户干等 15 秒再告诉他"得自己点"是没道理的。

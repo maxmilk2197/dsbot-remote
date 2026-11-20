@@ -54,7 +54,7 @@
 `--agent`（任何从 stdin 读、往 stdout 写的 CLI）；不带就只能被读文件、跑命令 —— 它不会
 假装自己能说话，`turn.request` 直接回 `node/unsupported`。
 
-不在同一个 WiFi 时，两边都打开 EasyTier（插件自带二进制，设置页一个开关，命令行是
+不在同一个 WiFi 时，两边都打开 EasyTier（插件按平台自动下载，只下一次，设置页一个开关，命令行是
 `--network`）。它负责让两台机器 IP 可达，配对码仍然是那把钥匙。
 
 
@@ -183,16 +183,25 @@ node packages/dsbot-nodes/probe-turn.mjs
 - [FORK.md](FORK.md) —— 为什么最终不用改 ds-bot 一行
 - [DISCLAIMER.md](DISCLAIMER.md) —— AI 生成声明与使用限制
 
-## EasyTier 二进制没进仓库
+## EasyTier 自动下载
 
-`packages/dsbot-remote/vendor/` 里的 EasyTier（约 33MB，按平台各一份）被 `.gitignore` 排除了。它是跨网组网那一步用的，**没有它，局域网内照常工作，跨网不行**。
-
-需要跨网时手动放进去：从 [EasyTier Releases](https://github.com/EasyTier/EasyTier/releases) 下载对应平台的包，解出可执行文件放到
+仓库**不再内置** EasyTier 二进制（每个平台约 30MB，放仓库里既臃肿又容易版本不一致）。第一次真正要跨网时，插件会按当前平台从 [EasyTier Releases](https://github.com/EasyTier/EasyTier/releases) 下载一次，解压后缓存在：
 
 ```
-packages/dsbot-remote/vendor/easytier/<platform>/easytier-core
+~/.dsh/bot/easytier/<版本>/<平台-架构>/
 ```
 
-`findEasyTier()` 会按平台找它；找不到就只是不跨网，不会崩。
+之后直接复用，不再联网。**没有它局域网内照常工作，只是跨不了网。**
+
+下载走的是 GitHub。网络不通时用环境变量换镜像或手动安装：
+
+| 变量 | 作用 |
+|---|---|
+| `DSBOT_EASYTIER_MIRROR` | 镜像前缀，例如 `https://ghfast.top/`，拼在 GitHub 地址前面 |
+| `DSBOT_EASYTIER_URL` | 直接给一个 zip 地址，跳过拼装 |
+| `DSBOT_EASYTIER_DIR` | 已经解压好的目录，优先使用，完全不下载 |
+| `DSBOT_EASYTIER_VERSION` | 换版本，默认 `v2.6.4` |
+
+手动安装就是下载对应平台的 zip，解压到上面那个缓存目录（或任意目录，然后把 `DSBOT_EASYTIER_DIR` 指过去）。
 
 另外 EasyTier 要建 TUN 设备，**Windows 上需要管理员权限**，这一步本仓库从未验证过（见「成熟度 · 根本没碰」）。

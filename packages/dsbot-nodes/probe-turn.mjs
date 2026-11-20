@@ -25,7 +25,7 @@ const started = await api.call(nodeId, 'turn.request', {
   turnId: 't1',
   prompt: '你在群里，帮我看一下这个需求：把首页的加载时间压到 1 秒内',
   tools: [],
-  cwd: 'D:/Default',
+  cwd: home,
   deadlineMs: 20000,
 })
 console.log('回执        :', JSON.stringify(started))

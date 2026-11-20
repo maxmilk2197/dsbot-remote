@@ -1,6 +1,8 @@
 // 本文件由 AI 生成，请勿用于生产环境。
 // 接线：一台"远端"真的连上来，主机认下它，然后把 node:<id> 注册成 provider。
 // 这里不测 chunk 语义（adapter.test.js 已测），只测"两端对上话"这件事。
+// 只有测试会设这个开关：生产环境 resetInstall 必须是空操作。
+process.env.DSBOT_NODES_TEST = '1'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'

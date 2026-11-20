@@ -14,22 +14,15 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { access, constants, mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { homedir, networkInterfaces } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
+import { ensureEasyTier, easyTierCacheDir, findEasyTierBinaries } from './easytier-fetch.js'
 
 export const EASYTIER_DIR = join(homedir(), '.dsbot-remote', 'easytier')
-/** 随包分发的 EasyTier（内置，用户不用另装）。目录按平台分：vendor/easytier/win32-x64/ */
-const VENDOR_PLATFORM = `${process.platform}-${process.arch}`
-// 内置 EasyTier 应该跟着主包走：<dsbot-nodes>/vendor/easytier/<平台-架构>/
-export const VENDORED_DIR = join(
-  import.meta.dirname, '..', '..', 'vendor', 'easytier', VENDOR_PLATFORM,
-)
-// 老布局：二进制早先是放在 dsbot-remote 包里的（体积大，不进 git，本地放）。
-// 两种都认，免得用户按旧说明摆好了却被告知"没找到 EasyTier"。
-const LEGACY_VENDORED_DIR = join(
-  import.meta.dirname, '..', '..', '..', 'dsbot-remote', 'vendor', 'easytier', VENDOR_PLATFORM,
-)
+// 二进制不再随仓库分发：第一次要跨网时按当前平台自动下载一份，缓存在
+// ~/.dsh/bot/easytier/<版本>/<平台-架构>/。离线环境把解压好的目录给
+// DSBOT_EASYTIER_DIR，那边优先用，不联网。
 // 跨网必须有个"会合点"：两端不在同一张局域网时，得先在一个公共节点上互相发现。
 //
 // 官方那个 public.easytier.cn 已经在 2026 年 2 月停服（域名现在是 NXDOMAIN），
@@ -223,39 +216,41 @@ export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeou
 }
 
 const isWindows = process.platform === 'win32'
-const CORE_BIN = isWindows ? 'easytier-core.exe' : 'easytier-core'
-const CLI_BIN = isWindows ? 'easytier-cli.exe' : 'easytier-cli'
 
-async function executable(path) {
-  try {
-    await access(path, constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** 在常见位置找 EasyTier。找不到返回 undefined（调用方负责提示用户）。 */
-export async function findEasyTier(extraDirs = []) {
-  const dirs = [
-    VENDORED_DIR,
-    LEGACY_VENDORED_DIR,
+/**
+ * 找一份能用的 EasyTier：
+ *   1. 显式给的目录（测试 / 调用方指定）
+ *   2. DSBOT_EASYTIER_DIR（离线安装）
+ *   3. 自动下载的缓存
+ *   4. ~/.dsbot-remote/easytier、常见安装目录、PATH
+ *   5. 都没有 → 按平台下载一份（测试环境不联网）
+ *
+ * 下载失败会抛错，让界面看到"为什么跨网没起来"，而不是笼统的"没找到"。
+ */
+export async function findEasyTier(extraDirs = [], { download = true, onLog } = {}) {
+  const deepDirs = [
     ...extraDirs,
+    process.env.DSBOT_EASYTIER_DIR,
+    easyTierCacheDir(),
     EASYTIER_DIR,
     join(homedir(), 'easytier'),
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'easytier') : undefined,
     process.env.ProgramFiles ? join(process.env.ProgramFiles, 'easytier') : undefined,
-    ...(process.env.PATH ?? '').split(delimiter).filter(Boolean),
   ].filter(Boolean)
 
-  for (const dir of dirs) {
-    const core = join(dir, CORE_BIN)
-    if (await executable(core)) {
-      const cli = join(dir, CLI_BIN)
-      return { core, cli: (await executable(cli)) ? cli : undefined, dir }
-    }
+  for (const dir of deepDirs) {
+    const found = findEasyTierBinaries(dir)
+    if (found !== undefined) return { ...found, source: 'local' }
   }
-  return undefined
+  // PATH 里只查当前目录，不往下翻 —— 那里目录太多了。
+  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    const found = findEasyTierBinaries(dir, process.platform, { deep: false })
+    if (found !== undefined) return { ...found, source: 'path' }
+  }
+
+  // 测试环境不联网：参数拼装另有专门的用例。
+  if (!download || process.env.DSBOT_NODES_TEST === '1') return undefined
+  return await ensureEasyTier({ onLog })
 }
 
 /** 列出本地目录里看起来像 EasyTier 的东西，给"我该放哪"的提示用。 */

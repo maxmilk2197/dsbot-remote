@@ -4,13 +4,16 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { acceptUpload } from './src/host/nodes/files.js'
 
-const here = 'D:/Default/dsbot-remote/packages'
-const bin = `${here}/dsbot-remote/bin/dsbot-remote.js`
-const agent = `${here}/dsbot-remote/test/attach-agent.mjs`
+// 从脚本位置推仓库结构：packages/dsbot-nodes/ -> packages/ -> 仓库根。
+const here = dirname(dirname(fileURLToPath(import.meta.url)))
+const repo = dirname(here)
+const bin = join(here, 'dsbot-remote', 'bin', 'dsbot-remote.js')
+const agent = join(here, 'dsbot-remote', 'test', 'attach-agent.mjs')
 
 const work = await mkdtemp(join(tmpdir(), 'attach-'))
 const source = join(work, '报告.txt')
@@ -21,7 +24,7 @@ const port = 7811
 const server = spawn(process.execPath, [
   bin, 'listen', '--port', String(port), '--token', 'attach-token-1',
   '--name', '写代码那台', '--cwd', work, '--agent', `node ${agent}`,
-], { cwd: 'D:/Default', env: { ...process.env, ATTACH_TARGET: source } })
+], { cwd: repo, env: { ...process.env, ATTACH_TARGET: source } })
 
 let serverOut = ''
 const waitFor = (needle) => new Promise((resolve, reject) => {

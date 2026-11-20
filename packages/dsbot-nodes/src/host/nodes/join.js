@@ -62,7 +62,7 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         // 广播只在同一张局域网里有效。找不到就是"对面不在这张网里"，
         // 不用让人回去翻参数 —— 直接进虚拟网，按主机的固定地址连。
         warn('局域网里没找到主机，改走跨网…')
-        const core = await findEasyTier().catch(() => undefined)
+        const core = await findEasyTier([], { onLog: line => warn(`  ${line}`) }).catch(() => undefined)
         if (core === undefined) throw broadcastFailed
         info = { ...info, host: `虚拟网 ${pairCredentials(clean).networkName}` }
         // 零权限：不建虚拟网卡（那要管理员），所以本机程序连不到虚拟网里的地址。

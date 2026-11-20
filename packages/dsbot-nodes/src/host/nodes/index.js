@@ -89,7 +89,14 @@ export function install(rt) {
 }
 
 // 测试用：让每个用例都能拿到干净的实例。
+//
+// 注意：DSH 在每次 apply 前后会调用插件导出的 reset* 函数（nodes-boot.log 里
+// 每 100ms 一次 resetInstall）。生产环境必须什么都不做 —— 否则防多开刚建好的
+// 实例会被立刻清掉，下一次 apply 又重建一份，等于白防。
 export function resetInstall() {
+  // 只认我们自己设的开关。NODE_TEST_CONTEXT 在 DSH 宿主里也有值，
+  // 用它做判断会把生产环境也放进来（trace 里 resetGuard 就是这么被调的）。
+  if (process.env.DSBOT_NODES_TEST !== '1') return
   resetGuard()
 }
 
