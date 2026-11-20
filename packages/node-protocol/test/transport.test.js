@@ -74,7 +74,7 @@ test('口令不对会被读成拒绝，而不是挂在那里', async () => {
   try {
     await assert.rejects(
       connectTcp({ url: `tcp://127.0.0.1:${server.port}`, token: 'wrong-token', timeoutMs: 2000 }),
-      /node\/unauthorized|拒绝/,
+      /node\/unauthorized|拒绝|配对码/,
     )
   } finally {
     server.close()

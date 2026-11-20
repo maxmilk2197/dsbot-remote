@@ -264,7 +264,7 @@ test('⑧ 换码：新码能连，旧码立刻失效', async () => {
 
     await assert.rejects(
       connectTcp({ url: `tcp://127.0.0.1:${rotated.port ?? hosted.port}`, token: before, timeoutMs: 3_000 }),
-      error => /口令|unauthorized|error/i.test(String(error.message ?? error)),
+      error => /口令|unauthorized|配对码|error/i.test(String(error.message ?? error)),
       '旧码必须连不上',
     )
     const again = await connectTcp({ url: `tcp://127.0.0.1:${rotated.port ?? hosted.port}`, token: rotated.code, timeoutMs: 3_000 })

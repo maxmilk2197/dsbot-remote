@@ -152,7 +152,7 @@ test('token 不对连不上，什么都不会被记下来', async () => {
   const api = install(rt)
   const remote = await startRemote({ name: '远端', deviceId: 'dev-ddd' })
   try {
-    await assert.rejects(api.connect({ url: remote.url, token: 'wrong-token-9' }), /unauthorized|拒绝/)
+    await assert.rejects(api.connect({ url: remote.url, token: 'wrong-token-9' }), /unauthorized|拒绝|配对码/)
     assert.equal(api.list().length, 0)
   } finally {
     remote.server.close()

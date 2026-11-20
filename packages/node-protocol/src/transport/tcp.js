@@ -6,6 +6,7 @@
 // 就够了。地址由 EasyTier（或局域网 / 公网 IP）提供，见 PLAN §12。
 import net from 'node:net'
 import { EventEmitter } from 'node:events'
+import { createHash, createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto'
 
 const HEADER = 4
 const MAX_FRAME_BYTES = 4 * 1024 * 1024
@@ -17,6 +18,42 @@ export class BadFrame extends Error {
     this.name = 'BadFrame'
     this.code = 'node/bad-frame'
   }
+}
+
+// 握手：配对码不上线，改成"用配对码当预共享密钥的 ECDH + HMAC"。
+// 以前 hello 帧里直接带 token，同网段任何人抓一个包就拿到了口令；改成：
+//   两端各生成一把一次性 X25519，DH 出共享密钥，再用 sha256(配对码) 当 HKDF salt
+//   推出会话密钥，主机先拿 HMAC(key,'host') 自证，节点回 HMAC(key,'node')。
+// 抓包的人没有配对码，推不出会话密钥，也答不出任何一个 HMAC。
+export const HANDSHAKE_PROTO = 2
+
+function newKeypair() {
+  const { publicKey, privateKey } = generateKeyPairSync('x25519')
+  const x = publicKey.export({ format: 'jwk' }).x
+  return { privateKey, publicB64: Buffer.from(x, 'base64url').toString('base64') }
+}
+
+function importPublic(b64) {
+  const text = String(b64 ?? '')
+  if (text === '') throw new BadFrame('握手缺少公钥')
+  const raw = Buffer.from(text, 'base64')
+  if (raw.length !== 32) throw new BadFrame('握手公钥长度不对')
+  return createPublicKey({ key: { kty: 'OKP', crv: 'X25519', x: raw.toString('base64url') }, format: 'jwk' })
+}
+
+// 配对码只进 salt，不直接当密钥：换码等于换会话密钥，旧连接也就断了。
+function sessionKey(shared, code, nodeNonce, hostNonce) {
+  const salt = createHash('sha256').update(String(code)).digest()
+  const info = Buffer.from(`dsbot-nodes/${HANDSHAKE_PROTO}|${nodeNonce}|${hostNonce}`, 'utf8')
+  return Buffer.from(hkdfSync('sha256', shared, salt, info, 32))
+}
+
+const prove = (key, label) => createHmac('sha256', key).update(label).digest('base64')
+
+function proofMatches(key, label, got) {
+  const want = Buffer.from(prove(key, label), 'utf8')
+  const have = Buffer.from(String(got ?? ''), 'utf8')
+  return want.length === have.length && have.length > 0 && timingSafeEqual(want, have)
 }
 
 export function encodeFrame(frame) {
@@ -186,24 +223,82 @@ export function parseTcpUrl(url) {
 export async function listenTcp({ port = 0, host = '0.0.0.0', token, onConnection, onFrame, idleMs = IDLE_MS }) {
   if (typeof token !== 'string' || token.length < 6) throw new BadFrame('a listen token needs at least 6 characters')
   const peers = new Set()
+  // 猜口令要有成本：同一个来源 60 秒内错 5 次，关 60 秒小黑屋。
+  // 6 位码只有 30 bit，没有这一层，网上随便一个脚本几分钟就能撞开。
+  const failures = new Map()
+  const attemptState = (address) => {
+    const now = Date.now()
+    const state = failures.get(address) ?? { count: 0, blockedUntil: 0, windowStart: now }
+    if (now - state.windowStart > 60_000) {
+      state.count = 0
+      state.windowStart = now
+    }
+    return state
+  }
   const server = net.createServer((socket) => {
+    const state = attemptState(socket.remoteAddress)
+    if (state.blockedUntil > Date.now()) {
+      socket.destroy()
+      return
+    }
     const peer = new Peer(socket, idleMs)
     peers.add(peer)
     peer.on('close', () => peers.delete(peer))
 
     let authed = false
+    const refuse = (code, message) => {
+      const now = Date.now()
+      state.count += 1
+      if (state.count >= 5) state.blockedUntil = now + 60_000
+      failures.set(socket.remoteAddress, state)
+      try { peer.send({ t: 'hello.error', code, message }) } catch {}
+      peer.close()
+    }
+
     peer.gate = (frame) => {
       if (authed) return true
       if (frame?.t === 'hello.error') { peer.close(); return false }
       if (frame?.t !== 'hello') { peer.close(); return false }
-      if (frame.token !== token) {
-        peer.send({ t: 'hello.error', code: 'node/unauthorized', message: '配对口令不对' })
-        peer.close()
+
+      let nodePublic
+      let nodeNonce
+      try {
+        nodeNonce = String(frame.nonce ?? '')
+        if (nodeNonce === '' || nodeNonce.length > 128) throw new BadFrame('握手 nonce 不对')
+        nodePublic = importPublic(frame.pub)
+      } catch (error) {
+        refuse('node/bad-handshake', error?.message ?? '握手格式不对')
         return false
       }
-      authed = true
-      peer.send({ t: 'hello.ack', proto: 1 })
-      onConnection?.(peer)
+
+      const { privateKey, publicB64 } = newKeypair()
+      const hostNonce = randomBytes(16).toString('base64')
+      let key
+      try {
+        key = sessionKey(diffieHellman({ privateKey, publicKey: nodePublic }), token, nodeNonce, hostNonce)
+      } catch (error) {
+        refuse('node/bad-handshake', error?.message ?? '握手算不出密钥')
+        return false
+      }
+
+      peer.send({ t: 'hello.challenge', proto: HANDSHAKE_PROTO, nonce: hostNonce, pub: publicB64, proof: prove(key, 'host') })
+      // 下一个帧必须是节点对挑战的回应；口令不对的人在这里过不去。
+      peer.gate = (answer) => {
+        if (authed) return true
+        if (answer?.t !== 'hello.auth') {
+          refuse('node/bad-handshake', '挑战之后必须回 hello.auth')
+          return false
+        }
+        if (!proofMatches(key, 'node', answer.proof)) {
+          refuse('node/unauthorized', '配对口令不对')
+          return false
+        }
+        authed = true
+        failures.delete(socket.remoteAddress)
+        peer.send({ t: 'hello.ack', proto: HANDSHAKE_PROTO })
+        onConnection?.(peer)
+        return false
+      }
       return false
     }
     if (onFrame !== undefined) peer.on('frame', onFrame)
@@ -242,17 +337,56 @@ export async function connectTcp({ url, token, timeoutMs = 5000, idleMs = IDLE_M
     socket.once('error', (error) => { clearTimeout(timer); reject(error) })
   })
 
+  const { privateKey, publicB64 } = newKeypair()
+  const nodeNonce = randomBytes(16).toString('base64')
+
+  let challengeSeen = false
   const ack = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new BadFrame('握手超时：对面没有回 hello.ack')), timeoutMs)
     timer.unref?.()
     peer.gate = (frame) => {
-      if (frame?.t === 'hello.ack') { clearTimeout(timer); resolve(frame); return false }
-      if (frame?.t === 'hello.error') { clearTimeout(timer); reject(new BadFrame(`对面拒绝：${frame.code ?? 'unknown'}`)); return false }
+      if (frame?.t === 'hello.error') {
+        clearTimeout(timer)
+        reject(new BadFrame(`对面拒绝：${frame.code ?? 'unknown'}`))
+        return false
+      }
+      if (frame?.t === 'hello.challenge' && !challengeSeen) {
+        challengeSeen = true
+        let key
+        try {
+          const hostPublic = importPublic(frame.pub)
+          key = sessionKey(
+            diffieHellman({ privateKey, publicKey: hostPublic }),
+            token,
+            nodeNonce,
+            String(frame.nonce ?? ''))
+        } catch (error) {
+          clearTimeout(timer)
+          reject(error instanceof BadFrame ? error : new BadFrame(`握手失败：${error?.message ?? error}`))
+          return false
+        }
+        // 先验主机：答不出 HMAC(key,'host') 的就不是拿着同一个配对码的主机，
+        // 局域网里随便哪个设备回一句 pair.ok 也骗不过这一步。
+        if (!proofMatches(key, 'host', frame.proof)) {
+          clearTimeout(timer)
+          try { peer.send({ t: 'hello.error', code: 'node/unauthorized', message: '对面证明不了自己知道配对码' }) } catch {}
+          peer.close()
+          reject(new BadFrame('对面证明不了自己知道配对码：可能不是主机'))
+          return false
+        }
+        peer.send({ t: 'hello.auth', proof: prove(key, 'node') })
+        return false
+      }
+      if (frame?.t === 'hello.ack') {
+        clearTimeout(timer)
+        resolve(frame)
+        return false
+      }
       return true
     }
   })
 
-  peer.send({ t: 'hello', proto: 1, token })
+  peer.send({ t: 'hello', proto: HANDSHAKE_PROTO, nonce: nodeNonce, pub: publicB64 })
   await ack
   peer.gate = null
   return peer
