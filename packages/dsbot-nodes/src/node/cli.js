@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url'
 import { connectTcp, listenTcp } from '@dsbot/node-protocol/tcp'
 import { findHost, listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { findEasyTier, hostVirtualIp, pairCredentials, startEasyTier } from './easytier.js'
-import { ALLOWED_ACTIONS, execute } from './exec.js'
+import { ALLOWED_ACTIONS, execute, withinRoot } from './exec.js'
 import { parseAgentCommand, runAgent } from './agent.js'
 import { runLocal } from './local-agent.js'
 
@@ -104,11 +104,17 @@ export async function deviceIdentity(name) {
 // 不扫目录、不猜"这一轮改了什么"——那两条都会把无关文件带进群。
 const ATTACH_BYTES = 3 * 1024 * 1024
 
-async function collectAttachments(text) {
+async function collectAttachments(text, root) {
   const found = []
   for (const match of String(text ?? '').matchAll(/^@@attach[ 	]+(.+)$/gm)) {
     const target = match[1].trim().replace(/^["'<]|["'>]$/g, '')
     if (target === '') continue
+    // 这一行是模型写的，不是用户写的：落在工作区之外的一律不带走，
+    // 否则一轮对话就能把 ~/.ssh/id_rsa 之类的东西发进群里。
+    if (typeof root === 'string' && root !== '' && !withinRoot(root, target)) {
+      say('跳过 ' + target + '：不在工作区 ' + root + ' 之内')
+      continue
+    }
     try {
       const info = await stat(target)
       if (!info.isFile()) { say(`跳过 ${target}：不是文件`); continue }
@@ -367,13 +373,14 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
 
       say(`一轮结束 ${turnId}：${result.ok ? 'ok' : result.code} ${String(result.text ?? '').length} 字`)
       // 这一轮要带出去的文件：模型把 `@@attach <路径>` 单独写一行，就是"这个文件给他看"。
-      const files = await collectAttachments(result.text)
+      const files = await collectAttachments(result.text, workspace)
       if (files.length > 0) say(`带走 ${files.length} 个文件：${files.map(f => f.name).join('、')}`)
       peer.send({
         method: 'turn.result',
         params: {
           turnId,
-          status: result.ok ? 'ok' : result.aborted ? 'cancelled' : 'failed',
+          // 协议里的枚举是 ok / error / cancelled，没有 'failed'。
+          status: result.ok ? 'ok' : result.aborted ? 'cancelled' : 'error',
           text: result.text,
           message: result.message,
           ...(files.length > 0 ? { files } : {}),
