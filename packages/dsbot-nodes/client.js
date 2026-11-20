@@ -88,6 +88,16 @@ window.__ModuleLoader__.load({
     }, children)
     const note = text => h('div', { style: { fontSize: 12, opacity: 0.65, lineHeight: 1.65 } }, text)
     const title = text => h('div', { style: { fontSize: 13, fontWeight: 600 } }, text)
+    // 一张分组卡片：边框只借 currentColor 的透明度，不写死颜色，深色/浅色主题都跟得上。
+    const card = children => h('div', {
+      style: {
+        display: 'flex', flexDirection: 'column', gap: 10,
+        padding: '14px 16px', borderRadius: 12,
+        border: '1px solid rgba(128, 128, 128, 0.22)',
+      },
+    }, children)
+    // 表单里的小标题：比正文重、比页面标题轻，官方设置页就是这个层级。
+    const label = text => h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.72 } }, text)
 
     const nameOf = group => (typeof group === 'string' ? group : (group?.name || group?.id || ''))
     const idOf = group => (typeof group === 'string' ? group : (group?.id ?? ''))
@@ -370,27 +380,28 @@ window.__ModuleLoader__.load({
             })
             : Button({ children: node.name, onClick: () => setRenaming(true) }),
           node.status === 'online' ? Tag({ children: '在线' }) : Tag({ children: '离线' }),
-          node.botName ? note('代表 Bot：' + node.botName) : null,
+          // Bot 名和机器名一样时不再重复一遍（初连的机器往往就是 IP 当名字）。
+          node.botName && node.botName !== node.name ? note('Bot：' + node.botName) : null,
           h('div', { style: { marginLeft: 'auto' } },
             Button({
-              children: busy === 'forget:' + node.id ? '移除中…' : '移除这台机器',
+              children: busy === 'forget:' + node.id ? '移除中…' : '移除',
               onClick: () => act('forget:' + node.id, () => jpost('/forget', { node: node.id })),
             }),
           ),
         ]),
 
         row([
-          note('工作区：'),
-          node.workspace ? Tag({ children: node.workspace }) : note('还没报上来（那台机器没选文件夹，或版本旧）'),
+          label('工作区'),
+          node.workspace ? Tag({ children: node.workspace }) : note('未上报'),
           node.status === 'online' && node.workspace
-            ? Button({ children: '浏览它的文件', onClick: () => { setBrowsing(true); void look('.') } })
+            ? Button({ children: '浏览文件', onClick: () => { setBrowsing(true); void look('.') } })
             : null,
         ]),
 
         row([
-          note('已授权：'),
+          label('已授权'),
           (node.allowed ?? []).length === 0
-            ? note('还没授权任何群 —— 它进不去，也说不了话')
+            ? note('还没授权任何群，它进不去也说不了话')
             : (node.allowed ?? []).map(group => h(Tag, { key: group.id, children: group.name })),
           Button({
             children: '授权群组',
@@ -400,7 +411,7 @@ window.__ModuleLoader__.load({
 
         // 没配 agent 的机器：能干活但不会说话。提前说，别等它进群之后每轮报错。
         Array.isArray(node.caps) && node.caps.length > 0 && !node.caps.includes('agent')
-          ? note('这台没配 agent：不会发言，只能接文件/命令。它在群里每一轮都会以「跑不了 turn」收场。')
+          ? note('未配置 agent：只接文件与命令，不参与群聊。')
           : null,
 
         row([
@@ -563,30 +574,30 @@ window.__ModuleLoader__.load({
       const nodes = state?.nodes || []
       const join = state?.join
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 680 } },
-        stack([
-          h('div', { style: { fontSize: 15, fontWeight: 600 } }, '远程节点'),
-          note('在另一台装了 DSH 的机器上装同一个插件，在它的「远程节点」里输入这个码。那台机器的 Bot 会进你的群，用它的算力和文件说话。'),
-        ]),
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 } },
+        // 页面标题由设置壳子统一渲染，这里不再重复一遍「远程节点」。
+        note('在另一台装了 DSH 的机器上装同一个插件，在它的「远程节点」里输入这个配对码。那台机器的 Bot 会进你的群，用它的算力和文件说话。'),
 
         error === '' ? null : note(error),
 
-        stack([
-          note('配对码'),
+        card([
+          label('配对码'),
           row([
             h('div', {
-              style: { fontSize: 28, fontWeight: 700, letterSpacing: 6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
-            }, code || '— — — — — —'),
-            Button({ children: copied ? '已复制' : '复制', onClick: () => copy(code) }),
-            Button({
-              variant: 'primary',
-              children: busy === 'rotate' ? '换码中…' : '换一个',
-              onClick: () => act('rotate', () => jpost('/rotate')),
-            }),
+              style: { fontSize: 26, fontWeight: 700, letterSpacing: 5, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+            }, code || '— — — — — — — —'),
+            h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 8 } },
+              Button({ children: copied ? '已复制' : '复制', onClick: () => copy(code) }),
+              Button({
+                variant: 'primary',
+                children: busy === 'rotate' ? '换码中…' : '换一个',
+                onClick: () => act('rotate', () => jpost('/rotate')),
+              }),
+            ),
           ]),
-          note(state?.hosting ? `正在等连接（端口 ${state.port}）` : '没有在监听 —— 端口被占或被防火墙拦了，换一个码再试'),
+          note(state?.hosting ? `正在等连接 · 端口 ${state.port}` : '没在监听：端口被占或被防火墙拦了，点「换一个」再试'),
           note(net?.on
-            ? `跨网已就绪（${net.ipv4 ?? net.name}）—— 换个网络也能连，对面输码就行`
+            ? `跨网已就绪 · ${net.ipv4 ?? net.name}`
             : net?.error
               ? `跨网没起来：${net.error}（同一个 WiFi 下照常用）`
               : '正在进虚拟网…'),
@@ -600,7 +611,7 @@ window.__ModuleLoader__.load({
                   if (typeof result?.script === 'string') setElevateScript(result.script)
                 }),
               }),
-              note('只提权 EasyTier，不重启 DSH，当前工作不中断'),
+              note('只提权 EasyTier，不重启 DSH'),
             ])
             : null,
           elevateScript === ''
@@ -612,13 +623,15 @@ window.__ModuleLoader__.load({
             ]),
         ]),
 
-        stack([
-          title('加入别人的群'),
+        card([
+          label('加入别人的群'),
           row([
             Input({
               value: joinCode,
-              placeholder: '对方那台的六位码',
-              onChange: event => setJoinCode(event.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 6)),
+              placeholder: '对方那台的 8 位配对码',
+              maxLength: 8,
+              autoComplete: 'off',
+              onChange: event => setJoinCode(event.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 8)),
               style: { flex: '1 1 160px', letterSpacing: 3 },
             }),
             Button({
@@ -632,13 +645,13 @@ window.__ModuleLoader__.load({
           ]),
           Input({
             value: joinAgent,
-            placeholder: '可选：跑一轮的命令（留空 = 直接用这台 DSH 已配好的模型，推荐）',
+            placeholder: '可选：跑一轮的命令（留空 = 用这台 DSH 已配好的模型）',
             onChange: event => setJoinAgent(event.target.value),
             style: { width: '100%' },
           }),
           join?.running
             ? stack([
-              note(`已连上${join.hostName ? '：' + join.hostName : ''}${join.workspace ? '｜工作区 ' + join.workspace : ''}`),
+              note(`已连上${join.hostName ? ' · ' + join.hostName : ''}${join.workspace ? ' · 工作区 ' + join.workspace : ''}`),
               join.agentLabel
                 ? note(`说话用：${join.agentLabel}`)
                 : note('这台 DSH 没找到可用模型：主机能把文件/命令交给它，但它在群里不会说话。可以在上面填一个 agent 命令（例如 dsh -p）再重连。'),
@@ -650,20 +663,20 @@ window.__ModuleLoader__.load({
             ])
             : join?.error
               ? note(join.error)
-              : note('这台机器也可以去别人的群里：输入对方的码，连上之后会让你选群组和主文件夹。'),
+              : note('输入对方的配对码即可加入；连上后会让你选群组和主文件夹。'),
         ]),
 
-        h('div', { style: { fontSize: 13, fontWeight: 600 } }, '已连上的机器' + (nodes.length ? `（${nodes.length}）` : '')),
+        title('已连上的机器' + (nodes.length ? ` · ${nodes.length}` : '')),
         nodes.length === 0
           ? note('还没有机器连过来')
-          : stack(nodes.map(node => h(NodeCard, {
+          : stack(nodes.map(node => card(h(NodeCard, {
             key: node.id,
             node,
             groups,
             busy,
             act,
             onRename: (id, name) => act('rename', () => jpost('/rename', { node: id, name })),
-          }))),
+          })))),
 
         h(JoinDialog, {
           open: dialog && join?.running === true,
