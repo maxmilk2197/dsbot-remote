@@ -32,7 +32,7 @@ const makeRt = async () => {
 
 const withRoutes = async (fn) => {
   const { rt, home, captured } = await makeRt()
-  install(rt)
+  const installed = install(rt)
   assert.equal(typeof captured.handler, 'function', '路由没挂上')
   const server = createServer((req, res) => { void captured.handler(req, res) })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
@@ -41,7 +41,12 @@ const withRoutes = async (fn) => {
     return await fn({ base: `http://127.0.0.1:${port}`, port })
   } finally {
     await new Promise(done => server.close(done))
-    await rm(home, { recursive: true, force: true })
+    // 插件自己还有异步尾巴（store 落盘、hosting 收尾）：先让它停，再删目录。
+    try { await installed?.dispose?.() } catch {}
+    // Windows 上刚关掉的文件偶尔还占着句柄，rm 会报 ENOTEMPTY；重试几次就好。
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { await rm(home, { recursive: true, force: true }); break } catch { await new Promise(done => setTimeout(done, 50)) }
+    }
   }
 }
 
