@@ -940,6 +940,19 @@ const isAllowedIn = (node, groupId) => {
   return (node.groups ?? []).includes(groupId)
 }
 
+// 配对码就是网络名和网络密钥的全部种子（pairCredentials 只拿它做 sha256），
+// 所以默认不下发：设置页显式要 ?reveal=1 才给。抽成纯函数，单元测试直接钉它。
+export function redactCode(state, reveal) {
+  if (state?.code === undefined) return state
+  const next = { ...state }
+  if (reveal === true) next.codeVisible = true
+  else {
+    delete next.code
+    next.codeHidden = true
+  }
+  return next
+}
+
 // 设置页读的就是这几个口：状态、换码、绑定、解绑。全走 JSON，不靠 HTML 表单。
 // 路由全进程只挂一次。
 //
@@ -1040,16 +1053,7 @@ function registerRoutes(rt, api, hosting) {
         return sendJson(res, 200, { ok: true, ...guardStats() })
       }
       if (req.method === 'GET' && path === '/api/nodes/status') {
-        const state = { ...hosting.status() }
-        // 配对码就是网络名和网络密钥的全部种子（pairCredentials 只拿它做 sha256），
-        // 所以默认不下发：设置页显式要 ?reveal=1 才给。
-        if (state.code !== undefined) {
-          if (url.searchParams.get('reveal') === '1') state.codeVisible = true
-          else {
-            delete state.code
-            state.codeHidden = true
-          }
-        }
+        const state = redactCode({ ...hosting.status() }, url.searchParams.get('reveal') === '1')
         return sendJson(res, 200, {
           ok: true,
           ...state,
