@@ -3,6 +3,9 @@
 // 这块会往远端的 ds-bot 数据里写东西，所以每条规矩都要有测试盯着。
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createMirror, mirrorName } from '../src/host/nodes/mirror.js'
 
 function fakeRt({ bots = 2, rooms = [] } = {}) {
@@ -157,4 +160,58 @@ test('hello 回执和 snapshot 同时到：同一个群只建一次', async () =
 
   assert.equal(calls.created.length, 1, '并发 ensure 不能建出两个群')
   assert.equal(a.id, b.id)
+})
+
+test('同一段历史重发两次：按 seq 只写一遍，水位回给主机', async () => {
+  const { rt, calls } = fakeRt()
+  const mirror = createMirror({ rt })
+  const lines = [
+    { seq: 7, who: 'Chief', text: '一' },
+    { seq: 8, who: 'Chief', text: '二' },
+  ]
+
+  await mirror.write({ roomId: 'host-1', roomName: '测试' }, lines)
+  // 重连：主机把最后一段又发了一遍（seq 一样），外加一条新的。
+  await mirror.write({ roomId: 'host-1', roomName: '测试' }, [...lines, { seq: 9, who: 'Chief', text: '三' }])
+
+  assert.deepEqual(calls.logged.map(each => each.line.text), ['一', '二', '三'], '重复的 seq 不该再写一遍')
+  assert.deepEqual(mirror.cursors(), { 'host-1': 9 }, '握手时要知道每个群收到第几条')
+})
+
+test('两台主机有同名群：镜像群分开，不合成一个', async () => {
+  const { rt, calls } = fakeRt()
+  const mirror = createMirror({ rt })
+
+  mirror.setHost('aaaa1111')
+  const one = await mirror.ensure({ roomId: 'host-1', roomName: '工作' })
+  mirror.setHost('bbbb2222')
+  const two = await mirror.ensure({ roomId: 'host-1', roomName: '工作' })
+
+  assert.notEqual(one.id, two.id, '不同主机的同名群必须是两个本地群')
+  assert.equal(calls.created.length, 2)
+  assert.equal(calls.created[0].name, mirrorName('工作'))
+  assert.match(calls.created[1].name, /^远程 · 工作 · bbbb$/)
+})
+
+test('重启后按进度文件找回同一个群，水位也还在', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsbot-mirror-'))
+  try {
+    const first = fakeRt()
+    const before = createMirror({ rt: first.rt, home: dir })
+    before.setHost('host-a')
+    await before.write({ roomId: 'host-1', roomName: '测试' }, [{ seq: 3, who: 'Chief', text: '之前' }])
+
+    // 新进程：同一个 home，room 还在 rt 里。
+    const second = fakeRt({ rooms: Object.values(first.state.rooms) })
+    const after = createMirror({ rt: second.rt, home: dir })
+    after.setHost('host-a')
+    await after.load()
+
+    assert.deepEqual(after.cursors(), { 'host-1': 3 }, '水位从盘上读回来')
+    const room = await after.ensure({ roomId: 'host-1', roomName: '测试' })
+    assert.equal(room.id, 'room-1', '找回来的还是上次那个群')
+    assert.equal(second.calls.created.length, 0, '不该再建一个')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
