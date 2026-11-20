@@ -153,6 +153,10 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
     imageRequestPricing() { return undefined }
 
     async listModels(route) {
+      // 节点记录是懒加载的：DSH 刚起来就来问模型表时，store 还没读盘，
+      // 这里会拿到"一台节点都没有"，于是 ds-bot 判定 bot.model 失联，
+      // 在群里说一句"default 已经不可用了"。先等它读出来再回答。
+      await this.deps.ready?.()
       const node = this.deps.nodes?.()[nodeIdOf(route)]
       if (node === undefined) return []
       // The remote runs its own model; the host cannot enumerate it without a
@@ -161,6 +165,7 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
     }
 
     async resolveModel(route, model) {
+      await this.deps.ready?.()
       const node = this.deps.nodes?.()[nodeIdOf(route)]
       return {
         provider: route,

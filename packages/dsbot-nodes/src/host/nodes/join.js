@@ -8,6 +8,7 @@ import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { parseAgentCommand } from '../../node/agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'
 import net from 'node:net'
+import { hostname } from 'node:os'
 import { addPortForward, findEasyTier, instancePorts, pairCredentials, startEasyTier, waitForHostPeer } from '../../node/easytier.js'
 import { createMirror } from './mirror.js'
 
@@ -28,7 +29,7 @@ export function createJoiner({ home, rt, warn = () => {} }) {
   let ctrl = null
   let info = {
     running: false, code: null, host: null, since: null, error: null,
-    hostName: '', workspace: '', groups: [], available: [],
+    hostName: '', workspace: '', groups: [], available: [], agent: false,
   }
   // 手机/另一台机器上的 ds-bot 里也出现这个群，消息双向（见 mirror.js）。
   const mirror = createMirror({ rt, warn })
@@ -63,6 +64,8 @@ export function createJoiner({ home, rt, warn = () => {} }) {
     info = {
       ...info, running: true, code: clean, error: null, host: null, since: Date.now(),
       hostName: '', workspace, groups: [], available: [],
+      // 这台配没配 agent：没配就只能读文件/跑命令，进了群也不会说话。
+      agent: typeof agent === 'string' && agent.trim() !== '',
     }
     // 加入端自己的端口和实例名。跨网分支里的 waitForHostPeer / addPortForward
     // 一开始就要用，必须在这里声明 —— 放到分支后面会 TDZ：
@@ -108,7 +111,9 @@ export function createJoiner({ home, rt, warn = () => {} }) {
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
       ctrl = servePeer(peer, {
-        name: name !== undefined && name !== '' ? name : (found.host ?? '这台机器'),
+        // 群里显示的名字：用户没填就用这台机器的名字。
+        // 以前退到 found.host，局域网里就成了"127.0.0.1"—— 群里没人想 @ 一个 IP。
+        name: name !== undefined && name !== '' ? name : hostname(),
         deviceId,
         cwd: workspace,
         wantedGroups,
@@ -170,9 +175,13 @@ export function createJoiner({ home, rt, warn = () => {} }) {
   }
 
   // 弹窗里点的那几个群：交给主机建成员，回执说清哪些进去了、哪些没成。
+  // 主机只认它授权过的群 —— 没授权的会出现在 refused 里，理由写"没授权"。
   async function want(groups) {
     if (ctrl === null) throw offline()
     const result = await ctrl.want(groups)
+    if (Array.isArray(result?.available)) {
+      info = { ...info, available: result.available }
+    }
     return {
       bound: Array.isArray(result?.bound) ? result.bound : [],
       refused: Array.isArray(result?.refused) ? result.refused : [],
@@ -180,5 +189,10 @@ export function createJoiner({ home, rt, warn = () => {} }) {
     }
   }
 
-  return { start, stop, status, say, setWorkspace, want }
+  // 只问不建：主机那边刚给这台机器加了授权，不用重连，问一句就能刷新列表。
+  function refresh() {
+    return want([])
+  }
+
+  return { start, stop, status, say, setWorkspace, want, refresh }
 }

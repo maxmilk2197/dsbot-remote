@@ -13,12 +13,48 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
-    // 宿主的组件。老宿上少了某个名字就退化成原生元素，至少不白屏。
-    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    const Button = primitives.Button ?? (props => h('button', props, props.children))
-    const Input = primitives.Input ?? (props => h('input', props))
-    const Modal = primitives.Modal ?? (props => (props.open === true ? h('div', {}, props.children) : null))
-    const Tag = primitives.Tag ?? (props => h('span', {}, props.children))
+    // 宿主的组件。拿不到就整体退化成原生元素 —— 一个 require 失败不该让整页空白。
+    let primitives = {}
+    try {
+      primitives = require('@deepseek-ai/dsh-client-ui-primitives') ?? {}
+    } catch (error) {
+      // 控制台留一句，免得"页面空白"没人知道为什么。
+      console.warn('dsbot-nodes: 宿主的 UI 组件没加载，退回原生控件', error)
+    }
+    // 统一用 h(组件, props) 渲染，而不是把组件当函数直接调：
+    // 宿主的 Button/Tag 可能是 class 或 forwardRef，直接 Button({...}) 会当场抛
+    // "Class constructor cannot be invoked without 'new'" —— 整页就白了。
+    const wrap = (Component, tag) => props => h(Component ?? tag, props, props.children)
+    const Button = wrap(primitives.Button, 'button')
+    const Input = wrap(primitives.Input, 'input')
+    const Tag = wrap(primitives.Tag, 'span')
+    const ModalInner = wrap(primitives.Modal, 'div')
+    const Modal = props => (props.open === true ? ModalInner(props) : null)
+
+    // 渲染出错时把错误摊在页面上，而不是整块留白 —— 白屏只能靠猜。
+    class Boundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { error: null }
+      }
+
+      static getDerivedStateFromError(error) {
+        return { error }
+      }
+
+      componentDidCatch(error, info) {
+        console.error('dsbot-nodes: 设置页渲染失败', error, info)
+      }
+
+      render() {
+        if (this.state.error !== null) {
+          return h('div', { style: { padding: 12, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, whiteSpace: 'pre-wrap' } },
+            '远程节点这一页渲染失败了，把下面这段发给我就能定位：\n\n'
+            + String(this.state.error?.stack ?? this.state.error))
+        }
+        return this.props.children
+      }
+    }
 
     const API = '/api/nodes'
 
@@ -118,7 +154,8 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 连上之后弹的那一框：选群组 + 选主文件夹 ----
-    function JoinDialog({ open, join, onClose, onSaved }) {
+    // 这里的群来自主机的"授权表"：没授权过的群，主机根本不会把名字发过来。
+    function JoinDialog({ open, join, onClose, onSaved, onRefresh }) {
       const available = React.useMemo(() => {
         const seen = new Set()
         const list = []
@@ -145,7 +182,18 @@ window.__ModuleLoader__.load({
         setRefused([])
         setPicked([])
         setFolder(join?.workspace ?? '')
+        // 每次打开都问一次主机："现在允许我进哪些群" —— 授权是那边随时能改的。
+        void Promise.resolve(onRefresh?.()).catch(() => {})
       }, [open])
+
+      const reload = async () => {
+        try {
+          await jpost('/join/refresh')
+          await Promise.resolve(onRefresh?.())
+        } catch (e) {
+          setError(e.message)
+        }
+      }
 
       const toggle = id => setPicked(prev => (prev.includes(id) ? prev.filter(each => each !== id) : [...prev, id]))
 
@@ -177,9 +225,12 @@ window.__ModuleLoader__.load({
       return h(React.Fragment, null,
         h(Modal, { open, onClose, title: '进哪个群？用哪个文件夹？', closeLabel: '关闭' }, stack([
           note('这台机器上的 Bot 会以成员身份出现在这些群里。主文件夹是主机能读、能跑命令的范围。'),
-          title('群组'),
+          row([
+            title('群组'),
+            Button({ children: '刷新', onClick: reload }),
+          ]),
           available.length === 0
-            ? note('对方还没有群。可以先连上，等它建了群再回来选。')
+            ? note('主机还没有把任何群授权给这台机器。去主机那台机器的「远程节点」里点这台机器的「授权群组」，勾上要开的群，再回来点刷新。')
             : stack(available.map(group => h('div', {
               key: group.id,
               style: { display: 'flex', alignItems: 'center', gap: 8 },
@@ -271,6 +322,9 @@ window.__ModuleLoader__.load({
       const [browsing, setBrowsing] = React.useState(false)
       const [listing, setListing] = React.useState({ path: '.', output: '', error: '' })
       const [notice, setNotice] = React.useState('')
+      // 授权表：这台机器能进哪些群。默认空 —— 连上来不等于能进任何群。
+      const [allowing, setAllowing] = React.useState(false)
+      const [allowed, setAllowed] = React.useState([])
 
       React.useEffect(() => { setDraft(node.name) }, [node.name])
       React.useEffect(() => {
@@ -334,6 +388,22 @@ window.__ModuleLoader__.load({
         ]),
 
         row([
+          note('已授权：'),
+          (node.allowed ?? []).length === 0
+            ? note('还没授权任何群 —— 它进不去，也说不了话')
+            : (node.allowed ?? []).map(group => h(Tag, { key: group.id, children: group.name })),
+          Button({
+            children: '授权群组',
+            onClick: () => { setAllowed((node.allowed ?? []).map(group => group.id)); setAllowing(true) },
+          }),
+        ]),
+
+        // 没配 agent 的机器：能干活但不会说话。提前说，别等它进群之后每轮报错。
+        Array.isArray(node.caps) && node.caps.length > 0 && !node.caps.includes('agent')
+          ? note('这台没配 agent：不会发言，只能接文件/命令。它在群里每一轮都会以「跑不了 turn」收场。')
+          : null,
+
+        row([
           h('select', {
             value: '',
             onChange: async event => {
@@ -365,6 +435,37 @@ window.__ModuleLoader__.load({
         ]),
 
         notice === '' ? null : note(notice),
+
+        // 授权表。没勾的群：远端连名字都看不到，也进不去、说不了话。
+        h(Modal, { open: allowing, onClose: () => setAllowing(false), title: `「${node.name}」能进哪些群`, closeLabel: '关闭' }, stack([
+          note('没勾的群，这台机器看不到、进不去、也说不了话。取消授权会把它从那个群里移出去。'),
+          groups.length === 0
+            ? note('这台主机还没有群。')
+            : stack(groups.map(group => h('div', {
+              key: group.id,
+              style: { display: 'flex', alignItems: 'center', gap: 8 },
+            },
+              Button({
+                variant: allowed.includes(group.id) ? 'primary' : undefined,
+                children: (allowed.includes(group.id) ? '✓ ' : '') + group.name,
+                onClick: () => setAllowed(prev => (
+                  prev.includes(group.id) ? prev.filter(each => each !== group.id) : [...prev, group.id]
+                )),
+              }),
+            )), { maxHeight: 260, overflowY: 'auto', gap: 6 }),
+          row([
+            Button({
+              variant: 'primary',
+              disabled: busy === 'allow',
+              children: busy === 'allow' ? '保存中…' : '保存',
+              onClick: async () => {
+                const ok = await act('allow', () => jpost('/allow', { node: node.id, groups: allowed }))
+                if (ok) { setAllowing(false); setNotice('授权已更新') }
+              },
+            }),
+            Button({ children: '取消', onClick: () => setAllowing(false) }),
+          ]),
+        ])),
 
         h(Modal, { open: browsing, onClose: () => setBrowsing(false), title: node.name + ' 的工作区', closeLabel: '关闭' }, stack([
           row([
@@ -421,10 +522,11 @@ window.__ModuleLoader__.load({
 
       // 连上的那一刻，把"选群组 + 选文件夹"这一框自动弹出来 —— 连接时该问的
       // 就那两件事。只自动弹一次，别每次轮询都盖上来。
+      // 一个群都没授权时也弹：框里会写清楚"去主机那边授权"，比什么都不说好。
       React.useEffect(() => {
         const join = state?.join
         if (autoOpened) return
-        if (join?.running === true && (join.available || []).length > 0 && (join.groups || []).length === 0) {
+        if (join?.running === true) {
           setDialog(true)
           setAutoOpened(true)
         }
@@ -536,6 +638,11 @@ window.__ModuleLoader__.load({
           join?.running
             ? stack([
               note(`已连上${join.hostName ? '：' + join.hostName : ''}${join.workspace ? '｜工作区 ' + join.workspace : ''}`),
+              // 没配 agent 就等于"只能看文件、不会说话"。不提前说清，
+              // 主机那边把它拉进群之后每一轮都会以"跑不了 turn"收场。
+              join.agent === false
+                ? note('这台没配 agent：主机能把文件/命令交给它，但它在群里不会说话。要让它发言，在上面填一个 agent 命令（例如 dsh -p）再点「连过去」，主机那边也要重新拉它进群。')
+                : null,
               row([
                 Button({ children: '选群组和文件夹', onClick: () => setDialog(true) }),
                 note(join.error ? join.error : ''),
@@ -575,7 +682,7 @@ window.__ModuleLoader__.load({
         if (slots === undefined) return
         slots.inject('settings.section', () => slots.register(
           { name: 'settings.section', id: 'dsbot-nodes', order: 42, label: '远程节点' },
-          () => h(Panel),
+          () => h(Boundary, null, h(Panel)),
         ))
       },
     }

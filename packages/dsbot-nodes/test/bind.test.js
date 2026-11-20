@@ -69,6 +69,21 @@ test('代理 Bot 的模型指向节点，欢迎语被扔掉', async () => {
   })
 })
 
+test('没配 agent 的机器不许进群：说清原因，不留下成员', async () => {
+  await withStore(async (store) => {
+    const { rt, state, calls } = fakeTeam({ rooms: [{ id: 'g1', name: '赚钱小组', members: ['bot-owner'] }] })
+    const node = await store.add({ name: '只有文件那台', deviceId: 'd-2' })
+    await store.update(node.id, { caps: ['exec', 'push_file'] })
+
+    await assert.rejects(
+      bindNodeToGroup({ rt, store, nodeId: node.id, groupId: 'g1', name: '只有文件那台' }),
+      (error) => error.code === 'node/no-agent' && /没配 agent/.test(error.message),
+    )
+    assert.equal(calls.created.length, 0, '不该为一个不会说话的成员造 Bot')
+    assert.deepEqual(state.rooms.g1.members, ['bot-owner'])
+  })
+})
+
 test('绑进群：模型是 node:id/default，成员里有它，节点记下群与 Bot', async () => {
   await withStore(async (store) => {
     const { rt, state } = fakeTeam({ rooms: [{ id: 'g1', name: '赚钱小组', members: ['bot-owner'] }] })

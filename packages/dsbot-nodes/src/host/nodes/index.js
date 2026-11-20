@@ -252,6 +252,10 @@ function installOnce(rt) {
         // 同一个 deviceId 再连上来是重连，不是新机器。
         const params = frame.params ?? {}
         const deviceId = String(params.deviceId ?? '').trim()
+        // 先把盘上的记录读出来再查找：list() 在 load 之前一律返回空数组，
+        // 拿空数组去找 deviceId 会把同一台机器当成新机器，凭空多建一条记录
+        // （界面上就是"手机"和"手机 2"两台）。
+        await store.load()
         // 探路：加入端在弹"选群组"的框之前，只想问一句"你这儿有哪些群"，不该
         // 在主机上留下一条"连过又断了"的记录。回完就断，store 一个字节都不写。
         if (params.probe === true) {
@@ -260,12 +264,13 @@ function installOnce(rt) {
               id: frame.id,
               result: {
                 proto: 1, ok: true, hostName: 'DSH 主机',
-                groups: [], available: listGroups(rt), probe: true,
+                // 还没认出是谁，当然没有授权 —— 一个群名都不给。
+                groups: [], available: [], probe: true,
               },
             })
           }
           peer.close()
-          resolve({ nodeId: null, probe: true, groups: listGroups(rt), hostName: 'DSH 主机' })
+          resolve({ nodeId: null, probe: true, groups: [], hostName: 'DSH 主机' })
           return
         }
         let record = store.list().find(node => deviceId !== '' && node.deviceId === deviceId)
@@ -286,13 +291,17 @@ function installOnce(rt) {
         // 回执里只给它**自己进了的**群，不是全部群。
         // 给全部的话，远端拿第一个就去发消息 —— 发到它根本不在的群里，主机只能拒，
         // 而那条拒绝以前连日志都没有，看着就是"消息发出去了但群里没有"。
-        // available 是另一回事：它要用来弹"选个群"的框，所以全都给。
+        // available 只给"主机授权过的 + 已经在的"，没授权的一个字都不透露。
         if (frame.id !== undefined) {
-          const mine = (record.groups ?? [])
+          const current = store.node(nodeId) ?? record
+          const mine = (current.groups ?? [])
             .map(id => rt.roomOf?.(id))
             .filter(room => room !== undefined)
             .map(room => ({ id: room.id, name: room.name || room.id }))
-          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: mine, available: listGroups(rt) } })
+          peer.send({
+            id: frame.id,
+            result: { proto: 1, ok: true, nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
+          })
         }
 
         peers.set(nodeId, peer)
@@ -353,7 +362,9 @@ function installOnce(rt) {
 
   const sendRecentLines = async (peer, record) => {
     if (typeof rt.groupLinesAfter !== 'function') return
-    for (const groupId of record.groups ?? []) {
+    const current = store.node(record.id) ?? record
+    for (const groupId of current.groups ?? []) {
+      if (!isAllowedIn(current, groupId)) continue
       const room = rt.roomOf?.(groupId)
       if (room === undefined) continue
       const all = await rt.groupLinesAfter(groupId, 0).catch(() => [])
@@ -413,6 +424,12 @@ function installOnce(rt) {
       : rt.roomOf?.(wanted)
     if (room === undefined) {
       refuse('node/not-found', `没有这个群：${wanted || '（它不在任何群里）'}`)
+      return
+    }
+    // 授权是硬门槛，比"是不是成员"更靠前：收回授权之后即使成员还没清，
+    // 这句话也不许落进群里。
+    if (!isAllowedIn(node, room.id)) {
+      refuse('node/denied', `主机没有授权「${room.name}」给这台机器`)
       return
     }
     if (!(room.members ?? []).includes(bot.id)) {
@@ -537,6 +554,13 @@ ${links.join(' ')}`
     }
   }
   syncRoutes()
+  // 节点记录是懒加载的：上面那次 syncRoutes 读到的其实是空列表。读完盘必须再注册
+  // 一遍 —— 否则重启之后 node:* 路由一条都不存在，群里就是那句
+  // "no adapter registered for provider node:n-xxxx"；模型列表也一起空着，
+  // ds-bot 转头就让 Bot 说"default 已经不可用了"。
+  void store.load()
+    .then(() => syncRoutes())
+    .catch(error => warn('dsbot-nodes: 读节点记录失败：%s', error?.message ?? error))
 
   // 主机自己的那一半：开端口、给配对码、应答局域网问询。装上就已经在等，
   // 用户只需要把码报给另一台机器。端口被占或被防火墙拦只报一句，不影响别的。
@@ -610,7 +634,8 @@ ${links.join(' ')}`
       if (line.text === '') return
       for (const [nodeId, peer] of peers) {
         const node = store.node(nodeId)
-        if (node === undefined || !(node.groups ?? []).includes(room.id)) continue
+        // 授权被收回的群，一条消息都不再推给它。
+        if (node === undefined || !isAllowedIn(node, room.id)) continue
         if (peer.closed === true) continue
         // 它自己刚说的话不用推回去（它当场就打印过了），免得每条都出现两遍。
         if (line.botId !== undefined && line.botId === node.botId) continue
@@ -676,13 +701,22 @@ ${links.join(' ')}`
       const running = binding.get(key)
       if (running !== undefined) return running
       const job = bindNodeToGroup({ rt, store, ...args })
-        .then((result) => {
+        .then(async (result) => {
+          // 主机在设置页亲手把某台机器放进一个群，等于同时授权了这个群 ——
+          // 不然下一秒它想说话就会被"没授权"挡下来。
+          const node = store.node(args.nodeId)
+          if (node !== undefined) {
+            const base = Array.isArray(node.allowedGroups)
+              ? node.allowedGroups
+              : (node.groups ?? []).filter(id => id !== args.groupId)
+            await store.update(args.nodeId, { allowedGroups: [...new Set([...base, args.groupId])] })
+          }
           // 刚进群就把最近的群消息推过去：那台机器上的镜像群是靠这个才建出来的，
           // 不推的话它要等到群里下一句话才知道自己进来了。
           const peer = peers.get(args.nodeId)
-          const node = store.node(args.nodeId)
-          if (peer !== undefined && node !== undefined) {
-            void sendRecentLines(peer, node).catch(error =>
+          const fresh = store.node(args.nodeId)
+          if (peer !== undefined && fresh !== undefined) {
+            void sendRecentLines(peer, fresh).catch(error =>
               warn('dsbot-nodes: 推群消息给 %s 失败：%s', args.nodeId, error?.message ?? error))
           }
           return result
@@ -693,6 +727,23 @@ ${links.join(' ')}`
     },
     unbind: args => unbindNodeFromGroup({ rt, store, ...args }),
     forget: args => forgetNode({ rt, store, ...args }),
+    // 授权：这台机器能碰哪些群，由主机说了算。
+    //   加：把它放进列表；删：立刻从那个群拿掉（成员、消息推送、发言一起停）。
+    // 远端没有任何办法给自己加授权 —— node.wants 只会对着这张表核对。
+    allow: async ({ nodeId, groups }) => {
+      const node = store.node(nodeId)
+      if (node === undefined) throw new LlmError(`没有这个节点：${nodeId}`, 'node/not-found')
+      const ids = [...new Set((Array.isArray(groups) ? groups : [])
+        .filter(id => typeof id === 'string' && id !== ''))]
+      await store.update(nodeId, { allowedGroups: ids })
+      // 收回授权就等于把人请出去：留着一个"能看不能说的成员"只会让人困惑。
+      for (const joined of [...(node.groups ?? [])]) {
+        if (ids.includes(joined)) continue
+        await unbindNodeFromGroup({ rt, store, nodeId, groupId: joined }).catch(error =>
+          warn('dsbot-nodes: 收回「%s」授权时退出失败：%s', joined, error?.message ?? error))
+      }
+      return { allowed: ids, node: store.node(nodeId) }
+    },
     // 配对码：界面与工具共用同一份状态。
     hosting,
     pair: args => hosting.start(args ?? {}),
@@ -710,6 +761,7 @@ ${links.join(' ')}`
     //   setWorkspace —— 换主文件夹，主机那边下一次心跳就知道
     say: (text, groupId) => joiner.say(text, groupId),
     want: groups => joiner.want(groups),
+    refresh: () => joiner.refresh(),
     setWorkspace: dir => joiner.setWorkspace(dir),
     disconnect(nodeId) {
       const peer = peers.get(nodeId)
@@ -722,11 +774,17 @@ ${links.join(' ')}`
   autoBind = async (nodeId, groups) => {
     const node = store.node(nodeId)
     if (node === undefined) return
+    const allowed = new Set([...(node.allowedGroups ?? []), ...(node.groups ?? [])])
     for (const wanted of groups) {
       const room = rt.roomOf?.(wanted)
         ?? Object.values(rt.state?.rooms ?? {}).find(each => each.name === wanted)
       if (room === undefined) {
         warn('dsbot-nodes: 加入端想进的群不存在：%s', wanted)
+        continue
+      }
+      // 握手时说"我要进 X"也一样要过授权：连上不等于被允许进任何群。
+      if (!allowed.has(room.id)) {
+        warn('dsbot-nodes: %s 想进「%s」，但主机没授权过这个群', node.name, room.name)
         continue
       }
       try {
@@ -744,6 +802,7 @@ ${links.join(' ')}`
       answer({ error: { code: 'node/not-found', message: '主机这边没有这台机器的记录' } })
       return
     }
+    const allowed = new Set([...(node.allowedGroups ?? []), ...(node.groups ?? [])])
     const asked = Array.isArray(frame.params?.groups) ? frame.params.groups : []
     const bound = []
     const refused = []
@@ -755,6 +814,13 @@ ${links.join(' ')}`
         refused.push({ id: wanted, reason: '没有这个群' })
         continue
       }
+      // 授权是硬门槛：没授权过的群，连"存在"都不确认 —— 理由统一说没授权，
+      // 免得远端靠 refused 的措辞把主机有哪些群试出来。
+      if (!allowed.has(room.id)) {
+        warn('dsbot-nodes: %s 想进「%s」，但主机没授权过这个群', node.name, room.name)
+        refused.push({ id: room.id, name: room.name || room.id, reason: '主机没有授权这个群' })
+        continue
+      }
       try {
         const result = await api.bind({ nodeId, groupId: room.id, name: node.name })
         bound.push({ id: room.id, name: room.name || room.id, botId: result.botId })
@@ -762,7 +828,13 @@ ${links.join(' ')}`
         refused.push({ id: room.id, name: room.name || room.id, reason: error?.message ?? String(error) })
       }
     }
-    answer({ result: { ok: true, bound, refused } })
+    // 空列表 = 只问不建：加入端用它刷新"现在允许我进哪些群"。
+    answer({
+      result: {
+        ok: true, bound, refused,
+        available: allowedGroupsOf(rt, store.node(nodeId) ?? node),
+      },
+    })
   }
   // 握手发生在 api 建好之前：那会儿记下的群现在补建。
   for (const [nodeId, groups] of pendingAutoBind) {
@@ -803,6 +875,27 @@ const listGroups = (rt) => {
     name: room.name || room.id,
     members: (room.members ?? []).length,
   }))
+}
+
+// 这台机器被允许碰哪些群 = 主机授权过的 + 它已经进去了的。
+// 没授权的群，连"有哪些群"都不告诉它 —— 群名本身就是信息。
+// 注意别把 state.rooms 直接甩给远端：那是主机全部群，包括它不该知道的。
+const allowedGroupsOf = (rt, node) => {
+  const ids = Array.isArray(node?.allowedGroups)
+    ? new Set([...node.allowedGroups, ...(node?.groups ?? [])])
+    : new Set(node?.groups ?? [])
+  if (ids.size === 0) return []
+  return listGroups(rt).filter(group => ids.has(group.id))
+}
+
+// 能不能在这个群说话 / 看它：
+//   新记录（有 allowedGroups）看授权表；老记录没有这个字段，就按"已经进的群"算，
+//   不然升级之后老机器会被一刀切掉。
+const isAllowedIn = (node, groupId) => {
+  if (Array.isArray(node?.allowedGroups)) {
+    return node.allowedGroups.includes(groupId) || (node.groups ?? []).includes(groupId)
+  }
+  return (node.groups ?? []).includes(groupId)
 }
 
 // 设置页读的就是这几个口：状态、换码、绑定、解绑。全走 JSON，不靠 HTML 表单。
@@ -853,6 +946,8 @@ function registerRoutes(rt, api, hosting) {
             // 那台机器选的主文件夹。主机靠它知道"它的工作区在哪"，
             // 也靠它给"浏览工作区"定根目录。
             workspace: node.workspace ?? '',
+            // 主机授权给它的群：设置页的"授权群组"就编辑这张表。
+            allowed: allowedGroupsOf(rt, node).map(group => ({ id: group.id, name: group.name })),
             groups: (node.groups ?? []).map(id => {
               const room = rt.roomOf?.(id)
               return { id, name: room?.name ?? id }
@@ -886,6 +981,18 @@ function registerRoutes(rt, api, hosting) {
       if (req.method === 'POST' && path === '/api/nodes/leave') {
         return sendJson(res, 200, { ok: true, join: api.leave() })
       }
+      // 授权：这台机器能碰哪些群。收回的群会当场把它请出去。
+      if (req.method === 'POST' && path === '/api/nodes/allow') {
+        const body = await readBody(req)
+        const node = api.resolveNode(body.node)
+        const groups = Array.isArray(body.groups) ? body.groups.filter(each => typeof each === 'string') : []
+        const result = await api.allow({ nodeId: node.id, groups })
+        return sendJson(res, 200, {
+          ok: true,
+          allowed: result.allowed,
+          node: api.list().find(each => each.id === node.id) ?? null,
+        })
+      }
       // 弹窗里点的那几个群：交给主机去建成员，回执说明哪些进去了、哪些被拒。
       if (req.method === 'POST' && path === '/api/nodes/join/wants') {
         const body = await readBody(req)
@@ -896,6 +1003,10 @@ function registerRoutes(rt, api, hosting) {
       if (req.method === 'POST' && path === '/api/nodes/join/workspace') {
         const body = await readBody(req)
         return sendJson(res, 200, { ok: true, join: await api.setWorkspace(body.path) })
+      }
+      // 只问不建：主机刚加了授权，这边刷新一下能进哪些群，不用重连。
+      if (req.method === 'POST' && path === '/api/nodes/join/refresh') {
+        return sendJson(res, 200, { ok: true, ...(await api.refresh()) })
       }
       // 加入端直接往主机的群里说话：落群走的是它自己那个成员身份。
       if (req.method === 'POST' && path === '/api/nodes/say') {

@@ -98,37 +98,56 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
         name: '手机',
         deviceId: 'dev-lab-1',
         cwd: workspace,
-        wantedGroups: ['g1'],
+        wantedGroups: [],
+        // 配了 agent 才有资格进群（没配的会被 bind 直接挡住）。
+        agent: { command: 'node', args: ['-e', ''] },
         inbox: false,
         onHostInfo: (value) => { clearTimeout(timer); resolve(value) },
       })
     })
 
-    // 1) 回执里有"可以进哪些群"：加入端就是靠这份列表弹框的。
-    assert.deepEqual(info.available.map(group => group.id).sort(), ['g1', 'g2'])
+    // 1) 主机还没授权任何群：一个群名都不该发给它（群名本身就是信息）。
+    assert.deepEqual(info.available, [])
 
-    // 2) 握手时点名的 g1 已经被建出来了；没点过的 g2 不会自己进。
     const [node] = api.list()
     assert.equal(node.name, '手机')
     assert.equal(node.workspace, workspace, '主机要记住加入端选的主文件夹')
+
+    // 2) 没授权就想进 g1：进不去，成员表一个字节都不变。
+    const denied = await ctrl.want(['g1'])
+    assert.deepEqual(denied.bound, [])
+    assert.equal(denied.refused[0].reason, '主机没有授权这个群')
+    assert.deepEqual(rt.state.rooms.g1.members, ['chief'])
+
+    // 3) 主机授权 g1 之后：进得去，回执里也只多出 g1（不泄露 g2）。
+    await api.allow({ nodeId: node.id, groups: ['g1'] })
+    const granted = await ctrl.want(['g1'])
+    assert.deepEqual(granted.bound.map(group => group.id), ['g1'])
+    assert.deepEqual(granted.available.map(group => group.id), ['g1'])
     await until(() => rt.state.rooms.g1.members.some(id => id !== 'chief'))
-    assert.equal(rt.state.rooms.g2.members.length, 1)
+    assert.equal(rt.state.rooms.g2.members.length, 1, '没授权的 g2 不该自己进')
     assert.equal(node.botId !== undefined, true)
 
-    // 3) 连上之后补选 g2：回执说明进去了；不存在的群要明确被拒。
+    // 4) 再授权 g2：补选成功；不存在的群要明确被拒。
+    await api.allow({ nodeId: node.id, groups: ['g1', 'g2'] })
     const wanted = await ctrl.want(['g2', 'nope'])
     assert.deepEqual(wanted.bound.map(group => group.id), ['g2'])
     assert.deepEqual(wanted.refused.map(group => group.id), ['nope'])
     assert.equal(rt.state.rooms.g2.members.length, 2)
 
-    // 4) 加入端直接说话：以它那个成员的身份落进群里。
+    // 5) 加入端直接说话：以它那个成员的身份落进群里。
     await ctrl.say('这边跑完了，三个测试全过', 'g2')
     assert.equal(posted.length, 1)
     assert.equal(posted[0].group, 'g2')
     assert.equal(posted[0].bot, node.botId)
     assert.equal(posted[0].text, '这边跑完了，三个测试全过')
 
-    // 5) 主机浏览那台机器的工作区：根目录、以及用 args.cwd 钻进子目录。
+    // 6) 收回授权：立刻从群里拿掉，之后也不能再往那儿说话。
+    await api.allow({ nodeId: node.id, groups: ['g1'] })
+    assert.deepEqual(rt.state.rooms.g2.members, ['chief'])
+    await assert.rejects(ctrl.say('还能说吗', 'g2'), (error) => /没有授权/.test(error.message))
+
+    // 7) 主机浏览那台机器的工作区：根目录、以及用 args.cwd 钻进子目录。
     const root = await api.call(node.id, 'node.exec', { execId: 'fs-1', action: 'list_dir', args: { path: '.' } })
     assert.equal(root.ok, true)
     assert.match(String(root.output), /a\.txt/)

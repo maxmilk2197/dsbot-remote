@@ -52,6 +52,13 @@ export async function createProxyBot({ rt, name, role = '', avatar }) {
 export async function bindNodeToGroup({ rt, store, nodeId, groupId, name, role, avatar, cwd }) {
   const node = store.node(nodeId)
   if (node === undefined) throw Object.assign(new Error(`没有这个节点：${nodeId}`), { code: 'node/not-found' })
+  // 没配 agent 的机器进了群也不能发言：它的每一轮都会以"跑不了 turn"收场。
+  // 与其让群里多一个永远出错的成员，不如在这里把原因说清楚。
+  if (Array.isArray(node.caps) && !node.caps.includes('agent')) {
+    throw Object.assign(new Error(
+      `${node.name} 没配 agent，进了群也不能发言。在它那台机器的「远程节点」里填一个 agent 命令（例如 dsh -p）再连一次。`,
+    ), { code: 'node/no-agent' })
+  }
   const room = rt.roomOf(groupId)
   if (room === undefined) throw Object.assign(new Error(`没有这个群：${groupId}`), { code: 'node/not-found' })
   if ((room.members ?? []).length >= 32) {
