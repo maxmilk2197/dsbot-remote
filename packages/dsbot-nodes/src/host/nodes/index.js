@@ -748,7 +748,17 @@ ${links.join(' ')}`
       return job
     },
     unbind: args => unbindNodeFromGroup({ rt, store, ...args }),
-    forget: args => forgetNode({ rt, store, ...args }),
+    forget: async args => {
+      const result = await forgetNode({ rt, store, ...args })
+      // 遗忘 = 断开 + 删除。只删记录不断线，那台机器还能继续说话、继续接活，
+      // 列表里却看不到它 —— 用户以为"已经赶走了"，其实没有。
+      const peer = peers.get(args.nodeId)
+      if (peer !== undefined) {
+        try { peer.close() } catch { /* 已经断了 */ }
+        peers.delete(args.nodeId)
+      }
+      return result
+    },
     // 授权：这台机器能碰哪些群，由主机说了算。
     //   加：把它放进列表；删：立刻从那个群拿掉（成员、消息推送、发言一起停）。
     // 远端没有任何办法给自己加授权 —— node.wants 只会对着这张表核对。
