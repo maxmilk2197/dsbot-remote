@@ -993,7 +993,7 @@ const ROUTE_KEY = Symbol.for('dsbot-nodes.routes/v1')
 
 function routeState() {
   if (globalThis[ROUTE_KEY] === undefined) {
-    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null }
+    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null, server: null }
   }
   return globalThis[ROUTE_KEY]
 }
@@ -1270,17 +1270,26 @@ function registerRoutes(rt, api, hosting) {
       return
     }
     const routes = routeState()
-    // 已经挂过了：handler 会现取 current，不需要再挂一份。
-    if (routes.mounted) return
+    // 同一个 web server 上已经挂过：handler 每次现取 current，不需要再挂一份。
+    // 换了 server（DSH 重启了 web 服务、端口变了）就必须重挂 —— 旧路由跟着旧 server
+    // 一起走了，只剩一个 mounted=true 的错觉，设置页从此永远 404。
+    if (routes.mounted && routes.server === server) return
+    if (routes.mounted) {
+      try { routes.unregister?.() } catch {}
+      routes.mounted = false
+      routes.unregister = null
+    }
     try {
       const off = server.register({ kind: 'prefix', path: '/api/nodes', handler })
       routes.mounted = true
+      routes.server = server
       routes.unregister = typeof off === 'function' ? off : null
     } catch (error) {
       const message = String(error?.message ?? error)
       if (/duplicate prefix/i.test(message)) {
         // 旧版本实例的路由还占着这个前缀。不重复挂，也不装作挂上了。
         routes.mounted = true
+        routes.server = server
         rt.warn?.('dsbot-nodes: 路由被旧实例占用，这次不重复挂；重启 DSH 后恢复')
         return
       }
@@ -1484,6 +1493,7 @@ export function apply(ctx, config = {}) {
   const attach = () => {
     ctx.inject(['bot', 'llm'], (sub) => {
       bootNote('deps ready')
+      depsReady = true
       // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
       // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
       // effect 会抛 cannot create effect on inactive context，一路冒到 DSH 的
@@ -1496,6 +1506,21 @@ export function apply(ctx, config = {}) {
     })
   }
 
+  // 没有 'bot' 服务就什么都不发生：ds-bot 不自带 ctx.provide('bot', rt)，那一行是
+  // dsbot-remote 打的补丁（见仓库 FORK.md / profile 的 patches/ds-bot@*.patch）。
+  // ds-bot 升级会把补丁冲掉，症状是设置页永远 404、hosting 不起、日志里只有
+  // "install deferred" —— 太安静了，这里补一条能直接指向原因的话。
+  let depsReady = false
+  const waitForDeps = ms => {
+    const timer = setTimeout(() => {
+      if (depsReady) return
+      bootNote('等不到 bot 服务：ds-bot 需要 ctx.provide(\'bot\', rt) 这一行补丁，'
+        + '升级 ds-bot 后要重新应用（pnpm.patchedDependencies → patches/ds-bot@*.patch）。'
+        + '远程节点功能不可用，DSH 其余部分不受影响')
+    }, ms)
+    timer.unref?.()
+    return timer
+  }
   const delay = Math.max(0, Number(process.env.DSBOT_NODES_DELAY_MS ?? STARTUP_DELAY_MS))
   if (delay === 0) {
     try {
@@ -1507,6 +1532,7 @@ export function apply(ctx, config = {}) {
   }
 
   bootNote(`install deferred ${delay}ms（避开 DSH 启动期）`)
+  const depsTimer = waitForDeps(delay + 45_000)
   const timer = setTimeout(() => {
     try {
       attach()
@@ -1517,7 +1543,7 @@ export function apply(ctx, config = {}) {
   timer.unref?.()
   // context 卸载时别留一个孤零零的定时器。
   try {
-    ctx.effect?.(() => () => clearTimeout(timer))
+    ctx.effect?.(() => () => { clearTimeout(timer); clearTimeout(depsTimer) })
   } catch {}
 }
 

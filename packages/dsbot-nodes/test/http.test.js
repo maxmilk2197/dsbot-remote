@@ -137,6 +137,41 @@ test('带 agent 的加入必须 confirm: true，否则拦在 spawn 之前', asyn
   })
 })
 
+test('web server 换了（DSH 重启 web 服务）：路由要重挂到新实例上', async () => {
+  resetInstall()
+  globalThis[Symbol.for('dsbot-nodes.routes/v1')] = undefined
+  const home = await mkdtemp(join(tmpdir(), 'http-swap-'))
+  const makeServer = () => {
+    const cap = { handler: null, unregistered: 0 }
+    return {
+      cap,
+      server: { register: route => { cap.handler = route.handler; return () => { cap.unregistered += 1 } } },
+    }
+  }
+  const rtFor = server => ({
+    home,
+    readOnly: () => false,
+    warn: () => {},
+    ctx: { effect: () => {}, llm: { registerAdapter: () => () => {} }, webServer: server },
+  })
+  const first = makeServer()
+  const a = install(rtFor(first.server))
+  try {
+    assert.equal(typeof first.cap.handler, 'function', '第一台 web server 没挂上')
+    resetInstall()
+    const second = makeServer()
+    const b = install(rtFor(second.server))
+    assert.equal(typeof second.cap.handler, 'function', '换了 web server 之后没重挂：设置页会一直 404')
+    assert.equal(first.cap.unregistered, 1, '旧 server 上的注册没有撤销')
+    await b?.dispose?.()
+  } finally {
+    try { await a?.dispose?.() } catch {}
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { await rm(home, { recursive: true, force: true }); break } catch { await new Promise(done => setTimeout(done, 50)) }
+    }
+  }
+})
+
 test('同源 JSON POST 能过闸门（不该被 403/415 误伤）', async () => {
   await withRoutes(async ({ base }) => {
     const left = await json(base, '/api/nodes/leave', {})
