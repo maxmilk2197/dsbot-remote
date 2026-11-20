@@ -1490,6 +1490,7 @@ export function apply(ctx, config = {}) {
 
   // 顶层 inject 里不写 'bot'：服务还没来时 cordis 连 apply 都不调，出问题只能看到
   // "什么都没发生"。改成运行时订阅——先证明插件活着，再等 ds-bot 把 runtime 挂上来。
+  let depsReady = false
   const attach = () => {
     ctx.inject(['bot', 'llm'], (sub) => {
       bootNote('deps ready')
@@ -1510,7 +1511,6 @@ export function apply(ctx, config = {}) {
   // dsbot-remote 打的补丁（见仓库 FORK.md / profile 的 patches/ds-bot@*.patch）。
   // ds-bot 升级会把补丁冲掉，症状是设置页永远 404、hosting 不起、日志里只有
   // "install deferred" —— 太安静了，这里补一条能直接指向原因的话。
-  let depsReady = false
   const waitForDeps = ms => {
     const timer = setTimeout(() => {
       if (depsReady) return

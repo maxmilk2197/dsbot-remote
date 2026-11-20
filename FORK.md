@@ -85,3 +85,31 @@ node packages/dsbot-nodes/probe-install.mjs           # apply(ctx) + ctx.bot
 ds-bot 自带一条手机 App 的链路：手机只往外连 `wss://relay.dsbot.app/v1/link`，端到端加密，调同一批 `/api/bot` 端点。我们**没用它**：relay 服务端不在包里、设备角色校验未知；实测跨地区 `ping` 470ms、50% 丢包，一轮对话光往返就 2 秒以上。
 
 v1 用 EasyTier / WireGuard 组网 + 自建 TCP 直连。两份代码互不干扰，状态文件也不同（`~/.dsh/bot/phone.json` vs `<home>/nodes.json`）。
+
+## 升级 ds-bot 之后：那一行补丁会被冲掉
+
+`ctx.provide('bot', rt)` 是 ds-bot 上游没有、由我们打上去的。**在 DS Bot 设置页点【更新】或 `pnpm update ds-bot` 会把 node_modules 换回原版，补丁消失**，症状是：
+
+- 远程节点设置页显示「读不到状态: HTTP 404」「没在监听」，配对码是空的破折号；
+- `~/.dsh/bot/nodes-boot.log` 里只有 `apply called` 和 `install deferred`，之后再没有 `deps ready`；
+- 7777 端口没有监听（`hosting.start()` 根本没跑）。
+
+现在用 pnpm 补丁固定住了（profile 目录）：
+
+```yaml
+# ~/.dsh/profiles/<profile>/pnpm-workspace.yaml
+patchedDependencies:
+  ds-bot@0.3.8: patches/ds-bot@0.3.8.patch
+```
+
+所以正常 `pnpm install` 会自动打回去。**唯一要管的是版本号**：升级到新版本（比如 0.3.9）时补丁文件对不上，需要重新生成：
+
+```bash
+cd ~/.dsh/profiles/<profile>
+pnpm patch ds-bot@<新版本> --edit-dir .tmp-patch-ds-bot
+# 在 .tmp-patch-ds-bot/index.js 的 createRuntime 里、return rt 之前加：
+#   ctx.provide('bot', rt)
+pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patches/
+```
+
+插件侧也加了兜底：装不上 45 秒后会往 nodes-boot.log 写一句「等不到 bot 服务」，指明是这行补丁。
