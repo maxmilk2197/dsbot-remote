@@ -44,6 +44,8 @@ import { createNodeStore } from './store.js'
 import { createHosting } from './hosting.js'
 import { createJoiner } from './join.js'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
+import { directionAllows, methodOf } from '@dsbot/node-protocol/methods'
+import { validateFields } from '@dsbot/node-protocol/validate'
 import { claimInstance, guardStats, newModuleId, releaseInstance, resetGuard } from './guard.js'
 
 export const name = 'dsbot-nodes'
@@ -466,6 +468,25 @@ function installOnce(rt) {
       return
     }
     if (typeof frame.method !== 'string') return
+    // 手写分发之前先过一遍协议表：不认识的方法当场回错误码（而不是落进
+    // emit 被当成正常事件），参数形状不对的请求回 invalid-params，而不是
+    // 让下游随手读 undefined。事件类（call: false）只记一笔，不打断连接。
+    const spec = methodOf(frame.method)
+    if (spec === undefined || !directionAllows(frame.method, 'node→host')) {
+      if (frame.id !== undefined) {
+        peers.get(nodeId)?.send({ id: frame.id, type: 'rpc.error', error: { code: 'node/unsupported', message: '主机不接 ' + frame.method } })
+      }
+      return
+    }
+    const problems = spec.params === undefined ? [] : validateFields(spec.params, frame.params ?? {})
+    if (problems.length > 0) {
+      const first = problems.slice(0, 3).map(each => each.path + ' 期望 ' + each.expected + '，拿到 ' + each.got).join('；')
+      if (spec.call === true && frame.id !== undefined) {
+        peers.get(nodeId)?.send({ id: frame.id, type: 'rpc.error', error: { code: 'node/invalid-params', message: first } })
+        return
+      }
+      warn('dsbot-nodes: %s 的 %s 参数不对：%s', nodeId, frame.method, first)
+    }
     // node.post 是唯一一个远端主动发起、主机必须理会的：它在群里说一句话。
     // 其余方法仍然拒绝 —— 远端不该能读群、建群、加成员。
     if (frame.method === 'node.post') {
