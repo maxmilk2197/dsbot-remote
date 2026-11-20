@@ -348,12 +348,14 @@ function trackChild(child) {
 }
 
 // 上一次没退干净的实例：pid 文件里记着，起来之前先收掉。
-function pidFile() {
-  return join(EASYTIER_DIR, 'current.pid')
+// 必须按实例（角色 + 配对码）分开存 —— 全局一个文件的话，起加入端会把
+// 正在跑的主机实例杀掉，跨网直接断。
+function pidFile(ports) {
+  return join(ports.configDir, 'current.pid')
 }
-function killPreviousInstance() {
+function killPreviousInstance(ports) {
   try {
-    const raw = JSON.parse(readFileSync(pidFile(), 'utf8'))
+    const raw = JSON.parse(readFileSync(pidFile(ports), 'utf8'))
     const pid = Number(raw?.pid)
     const at = Number(raw?.at ?? 0)
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return
@@ -361,16 +363,16 @@ function killPreviousInstance() {
     try { process.kill(pid) } catch {}
   } catch {}
 }
-function rememberInstance(pid) {
+function rememberInstance(ports, pid) {
   try {
-    mkdirSync(EASYTIER_DIR, { recursive: true })
-    writeFileSync(pidFile(), JSON.stringify({ pid, at: Date.now() }))
+    mkdirSync(ports.configDir, { recursive: true })
+    writeFileSync(pidFile(ports), JSON.stringify({ pid, at: Date.now() }))
   } catch {}
 }
-function forgetInstance(pid) {
+function forgetInstance(ports, pid) {
   try {
-    const raw = JSON.parse(readFileSync(pidFile(), 'utf8'))
-    if (Number(raw?.pid) === pid) unlinkSync(pidFile())
+    const raw = JSON.parse(readFileSync(pidFile(ports), 'utf8'))
+    if (Number(raw?.pid) === pid) unlinkSync(pidFile(ports))
   } catch {}
 }
 
@@ -407,7 +409,7 @@ export function startEasyTier({
   const args = [...built.args, ...extraArgs]
 
   // 上一轮没退干净的先收掉，再起新的 —— 否则两个同名实例会抢 RPC 口。
-  killPreviousInstance()
+  killPreviousInstance(ports)
   try { mkdirSync(ports.configDir, { recursive: true }) } catch {}
 
   // cwd 必须跟着二进制走：EasyTier 要在自己旁边找 wintun.dll 建虚拟网卡。
@@ -419,8 +421,8 @@ export function startEasyTier({
   })
 
   trackChild(child)
-  if (child.pid !== undefined) rememberInstance(child.pid)
-  child.once('exit', () => { if (child.pid !== undefined) forgetInstance(child.pid) })
+  if (child.pid !== undefined) rememberInstance(ports, child.pid)
+  child.once('exit', () => { if (child.pid !== undefined) forgetInstance(ports, child.pid) })
 
   let output = ''
   const feed = (chunk) => {
