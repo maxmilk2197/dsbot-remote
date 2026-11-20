@@ -490,7 +490,7 @@ async function runPair(args) {
     if (network !== undefined) return network
     const found = await findEasyTier()
     if (found === undefined) {
-      fail(`没找到 EasyTier（找过 ${EASYTIER_DIR} 和 PATH）。先装一份，或确认两台机器在同一局域网。`)
+      fail(`没找到 EasyTier（找过 ~/.dsh/bot/easytier 和 PATH）。先装一份，或确认两台机器在同一局域网。`)
     }
     say(`加入虚拟网 ${pairCredentials(code).networkName} …`)
     network = startEasyTier({ core: found.core, code, onLog: line => say(`  [et] ${line}`) })

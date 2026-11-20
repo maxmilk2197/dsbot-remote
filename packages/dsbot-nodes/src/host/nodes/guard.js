@@ -21,6 +21,9 @@ import { threadId } from 'node:worker_threads'
 
 // 临时追踪：同一个 moduleId 却被反复重建，先看清是谁清掉 owner 的。
 function trace(text) {
+  // 只有显式打开才写：这条日志一天能涨到几百 KB，生产环境没理由为了一句
+  // 追踪一直往磁盘上写。调试多开时设 DSBOT_NODES_TRACE=1。
+  if (process.env.DSBOT_NODES_TRACE !== '1') return
   try {
     const base = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
     appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} guard-trace ${text} thread=${threadId}\n`)

@@ -12,9 +12,10 @@
  *   DSBOT_EASYTIER_VERSION 换版本，默认下面的 EASYTIER_VERSION
  */
 import { spawn } from 'node:child_process'
-import { chmodSync, cpSync, createWriteStream, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, cpSync, createWriteStream, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
@@ -61,6 +62,31 @@ export function easyTierAssetUrl(version = EASYTIER_VERSION, platform = process.
 }
 
 /** 缓存根目录：跟 DSH 的其它数据放一起，卸载插件也不会误删。 */
+// 这段代码最终要执行一个从网上下来的二进制，所以两件事必须记账：
+//   1. 只认 https（DSBOT_EASYTIER_ALLOW_HTTP=1 才放开，给离线内网留口子）；
+//   2. 下载后把包和 core 的 sha256 写下来，下次复用缓存前先验一遍 ——
+//      缓存里被换掉的 core 等于一份别人塞进来的可执行文件。
+const SHA_FILE = 'sha256.json'
+
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function readManifest(dir) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, SHA_FILE), 'utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function writeManifest(dir, entry) {
+  try {
+    writeFileSync(join(dir, SHA_FILE), JSON.stringify(entry, null, 2))
+  } catch {}
+}
+
 export function easyTierCacheRoot() {
   const home = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
   return join(home, 'easytier')
@@ -210,12 +236,32 @@ async function download({ version, onLog, force }) {
   const dir = easyTierCacheDir(version)
   if (!force) {
     const cached = findEasyTierBinaries(dir)
-    if (cached !== undefined) return { ...cached, source: 'cache', version }
+    if (cached !== undefined) {
+      const manifest = readManifest(dir)
+      if (manifest === undefined || typeof manifest.core !== 'string') {
+        return { ...cached, source: 'cache', version }
+      }
+      let actual = ''
+      try { actual = sha256File(cached.core) } catch { actual = '' }
+      if (actual === manifest.core) return { ...cached, source: 'cache', version }
+      onLog('缓存里的 EasyTier 和记账的哈希对不上，当作不可信，重新下一份')
+      quietRemove(dir, { recursive: true })
+    }
   }
 
   const url = easyTierAssetUrl(version)
   if (url === undefined) {
     throw new Error(`EasyTier 没有 ${process.platform}-${process.arch} 的官方包，请手动安装并设置 DSBOT_EASYTIER_DIR`)
+  }
+
+  let parsedUrl
+  try {
+    parsedUrl = new URL(url)
+  } catch {
+    throw new Error('EasyTier 的下载地址不是一个 URL：' + url)
+  }
+  if (parsedUrl.protocol !== 'https:' && process.env.DSBOT_EASYTIER_ALLOW_HTTP !== '1') {
+    throw new Error('拒绝从非 https 地址下载 EasyTier（' + parsedUrl.protocol + '）：' + url)
   }
 
   mkdirSync(dir, { recursive: true })
@@ -273,6 +319,15 @@ async function download({ version, onLog, force }) {
     }
   }
 
+  // 包本身也记一笔：设了 DSBOT_EASYTIER_SHA256 就当成硬约束比对，
+  // 没设就只记录，至少事后能查出"哪一次换的包"。
+  const zipSha256 = sha256File(zip)
+  const pinned = String(process.env.DSBOT_EASYTIER_SHA256 ?? '').trim().toLowerCase()
+  if (pinned !== '' && pinned !== zipSha256) {
+    quietRemove(zip)
+    throw new Error('EasyTier 包的 sha256 和 DSBOT_EASYTIER_SHA256 不一致：' + zipSha256)
+  }
+
   onLog('下载完成，正在解压')
   try {
     mkdirSync(stage, { recursive: true })
@@ -285,6 +340,16 @@ async function download({ version, onLog, force }) {
   quietRemove(zip)
 
   const staged = findEasyTierBinaries(stage)
+  // zip-slip：解压出来的 core 必须还在 stage 里面，不然下一步的 cpSync
+  // 会把写到外面的东西搬进缓存目录。
+  const stageRoot = resolve(stage)
+  if (staged !== undefined) {
+    const target = resolve(staged.core)
+    if (target !== stageRoot && !target.startsWith(stageRoot + sep)) {
+      quietRemove(stage, { recursive: true })
+      throw new Error('解压出来的路径跑到了临时目录外面：' + target)
+    }
+  }
   if (staged === undefined) {
     quietRemove(stage, { recursive: true })
     throw new Error(`解压后没找到 ${coreName()}，目录：${stage}`)
@@ -308,7 +373,15 @@ async function download({ version, onLog, force }) {
       if (found.cli !== undefined) chmodSync(found.cli, 0o755)
     } catch {}
   }
-  onLog(`EasyTier 就绪：${found.core}`)
+  writeManifest(dir, {
+    version,
+    asset: easyTierAssetName(version),
+    url,
+    zipSha256,
+    core: sha256File(found.core),
+    at: new Date().toISOString(),
+  })
+  onLog('EasyTier 就绪：' + found.core)
   return { ...found, source: 'download', version }
 }
 

@@ -75,7 +75,8 @@ export function createNodeStore({ home, readOnly = () => undefined, warn = () =>
     const tmp = `${file}.${process.pid}.tmp`
     const payload = `${JSON.stringify(data, null, 2)}
 `
-    await writeFile(tmp, payload)
+    // 里面有 host.code 明文（配对码 = 网络密钥的种子），不该让同机别的用户读。
+    await writeFile(tmp, payload, { mode: 0o600 })
     // Windows 上杀软/同步盘会短暂锁住刚写的文件，rename 报 EPERM。
     // 重试两次，还不行就直接覆盖写：内容一样，只是少了一次原子切换。
     for (let attempt = 0; ; attempt += 1) {
@@ -84,7 +85,7 @@ export function createNodeStore({ home, readOnly = () => undefined, warn = () =>
         return
       } catch (error) {
         if (attempt >= 2) {
-          await writeFile(file, payload)
+          await writeFile(file, payload, { mode: 0o600 })
           await rm(tmp, { force: true })
           return
         }

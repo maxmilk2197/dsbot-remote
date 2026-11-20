@@ -370,7 +370,10 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
     cancelTurn(turnId, reason = 'the host cancelled the turn') {
       const mailbox = this.inflight.get(turnId)
       if (mailbox === undefined) return false
-      mailbox.push({ kind: 'closed' })
+      // 以前这里推的是 { kind: 'closed' }，那是"连不上 / 被 dispose"的语义：
+      // 循环会 break，整轮变成 NODE_DISCONNECTED，界面上显示成节点掉线。
+      // 主机主动取消应当是一条 aborted 结束信号（顺带把 turn.cancel 发给节点）。
+      mailbox.push({ kind: 'abort', error: Object.assign(new Error(reason), { code: 'ABORTED' }) })
       return true
     }
 
