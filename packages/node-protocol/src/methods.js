@@ -13,14 +13,25 @@ export const METHODS = Object.freeze({
     family: true,
     direction: 'node→host',
     call: true,
-    summary: '上线握手：带上身份、能力、每个群的续传点',
+    summary: '上线握手：带上身份、能力、工作区、每个群的续传点',
     params: {
       required: { proto: 'integer', nodeName: 'string', botId: 'string', botName: 'string' },
-      optional: { avatar: 'string', caps: 'array<string>', cursors: 'object' },
+      optional: {
+        avatar: 'string',
+        caps: 'array<string>',
+        cursors: 'object',
+        // 这台机器选定的主文件夹（绝对路径）。主机靠它知道"它的工作区在哪"，
+        // 也让主机的设置页能直接浏览这台机器的文件。
+        workspace: 'string',
+        // 只问不连：主机回一份主机名 + 全部群就散伙，不建记录、不登记在线。
+        probe: 'boolean',
+      },
     },
     result: {
       required: { nodeId: 'string', hostName: 'string', proto: 'integer' },
-      optional: { groups: 'array' },
+      // groups 是"它自己已经进了的群"；available 是"主机上有哪些群可以进"。
+      // 加入端靠 available 弹那个选群组的框。
+      optional: { groups: 'array', available: 'array' },
     },
   },
 
@@ -31,7 +42,9 @@ export const METHODS = Object.freeze({
     summary: '在线状态心跳（15s 一次），断线前最后一次是 offline',
     params: {
       required: { state: { type: 'string', enum: ['online', 'busy', 'offline'] } },
-      optional: { since: 'number' },
+      // workspace 跟心跳一起报：加入端换了主文件夹，主机这边下一次心跳就知道，
+      // 不用重连。
+      optional: { since: 'number', workspace: 'string' },
     },
     result: null,
   },
@@ -175,6 +188,23 @@ export const CONTROL_METHODS = Object.freeze({
     summary: '取消在途的一轮（用户点了停止，或主机要拉回本地模型）',
     params: { required: { turnId: 'string' }, optional: { reason: 'string' } },
     result: null,
+  },
+  // 加入端在弹窗里选好群之后申请进群。它是控制流而非那十个业务事件之一：
+  // 本身不发言、不同步聊天，只是让主机替它建成员。
+  'node.wants': {
+    direction: 'node→host',
+    call: true,
+    summary: '加入端申请进群：按主机给的群列表逐个建成员',
+    params: {
+      required: { groups: 'array<string>' },
+      optional: {},
+    },
+    result: {
+      required: { ok: 'boolean' },
+      // bound 是已经进成功的群；refused 是主机拒了的（不存在 / 没权限），
+      // 加入端据此在弹窗里标出来，而不是静默"选了但没进去"。
+      optional: { bound: 'array', refused: 'array' },
+    },
   },
 })
 

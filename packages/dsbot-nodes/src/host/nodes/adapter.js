@@ -199,6 +199,10 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
       const offResult = link.on('turn.result', (params) => {
         if (params.turnId === turnId) mailbox.push({ kind: 'result', result: params })
       })
+      // 那台机器掉线了：这条连接上再也不会有 turn.event / turn.result 了。
+      // 不收尾的话，群里会一直显示"正在输入…"直到 30 分钟的 deadline ——
+      // 用户看到的就是一条永远在打字的 Bot。断线是确定性的失败，当场结束这一轮。
+      const offOffline = link.on('node.offline', () => mailbox.push({ kind: 'offline' }))
       this.inflight.set(turnId, mailbox)
       const deadlineMs = this.deps.deadlineMs ?? DEFAULT_TURN_DEADLINE_MS
       const deadline = setTimeout(() => mailbox.push({ kind: 'timeout' }), deadlineMs)
@@ -258,6 +262,12 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
           if (item.kind === 'timeout') {
             link.send('turn.cancel', { turnId, reason: 'deadline' }).catch(() => {})
             throw new LlmError(`节点在 ${Math.round(deadlineMs / 60_000)} 分钟内没有回应`, 'NODE_TIMEOUT')
+          }
+          // 掉线：不看"有没有说过话"，直接把这一轮判死。半截的话先收尾，
+          // 群里看到的是一条失败提示，而不是一个永远打字中的成员。
+          if (item.kind === 'offline') {
+            yield* closeText()
+            throw new LlmError('那台机器掉线了，这一轮没法继续', 'NODE_OFFLINE')
           }
           if (item.kind === 'closed') break
 
@@ -345,6 +355,7 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
         clearTimeout(deadline)
         offEvent()
         offResult()
+        offOffline()
         this.inflight.delete(turnId)
         options.signal?.removeEventListener('abort', onAbort)
       }

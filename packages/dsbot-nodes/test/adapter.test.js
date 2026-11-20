@@ -222,6 +222,27 @@ test('节点一直不回：超时抛 NODE_TIMEOUT，并通知它别干了', asyn
   assert.ok(link.sent.some(entry => entry.method === 'turn.cancel'))
 })
 
+// 用户看到的是"群里那条 Bot 一直在输入，永远不结束"。根因是那台机器掉线后
+// 这条连接上再也不会来 turn.event / turn.result，而那一轮还在等 30 分钟的 deadline。
+test('节点掉线：这一轮当场以 NODE_OFFLINE 结束，不等 deadline', async () => {
+  const link = fakeLink({
+    start: (params, self) => {
+      // 先说半句，然后掉线 —— 半截文本必须收尾，不然群里留一个没有结尾的块。
+      self.emit('turn.event', { turnId: params.turnId, kind: 'delta', text: '我看一下' })
+      setTimeout(() => self.emit('node.offline', { nodeId: 'n-1' }), 5)
+      return { accepted: true }
+    },
+  })
+  const adapter = makeAdapter(link, { deadlineMs: 60_000 })
+  const chunks = []
+  await assert.rejects(
+    (async () => { for await (const chunk of adapter.stream(turnOptions())) chunks.push(chunk) })(),
+    (error) => error.code === 'NODE_OFFLINE',
+  )
+  // 掉线前那半句要被 block-end 收掉，不能留在半开状态。
+  assert.ok(chunks.some(chunk => chunk.type === 'block-end' && chunk.block?.text === '我看一下'))
+})
+
 test('标题请求不碰网络：标题是本地从第一条用户消息里截的', async () => {
   const link = fakeLink({ start: () => assert.fail('标题不该打到节点上') })
   const chunks = await collect(makeAdapter(link), turnOptions({ purpose: 'session-title' }))

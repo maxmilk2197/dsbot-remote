@@ -34,8 +34,9 @@ try {
   defineTool = definition => definition
 }
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { bindNodeToGroup, forgetNode, unbindNodeFromGroup } from './bind.js'
 import { createAdapterClass, nodeIdOf, routeOf } from './adapter.js'
 import { acceptUpload } from './files.js'
@@ -191,6 +192,23 @@ function installOnce(rt) {
 
   // ---- 连接 ----
 
+  // 加入端在握手/弹窗里点好的群，主机替它建成员。api 要等这一段跑完才存在，
+  // 所以先记在内存里，installOnce 末尾补跑 —— 握手可能发生在那之前。
+  let autoBind = null
+  // wantsGroups 同理：加入端连上之后弹窗选了群，再发一条 node.wants 过来。
+  let wantsGroups = null
+  const pendingAutoBind = new Map()
+  const requestAutoBind = (nodeId, groups) => {
+    const ids = [...new Set((groups ?? []).filter(id => typeof id === 'string' && id !== ''))]
+    if (ids.length === 0) return
+    if (autoBind === null) {
+      pendingAutoBind.set(nodeId, [...new Set([...(pendingAutoBind.get(nodeId) ?? []), ...ids])])
+      return
+    }
+    void autoBind(nodeId, ids).catch(error =>
+      warn('dsbot-nodes: 替 %s 建群成员失败：%s', nodeId, error?.message ?? error))
+  }
+
   // 握手：对面连上（或我们连上）之后先发一条 `node.hello`，主机记下它是谁。
   // 拿到 hello 之前不认这条连接 —— 一个连上来但不报身份的 socket 没有意义。
   //
@@ -234,29 +252,51 @@ function installOnce(rt) {
         // 同一个 deviceId 再连上来是重连，不是新机器。
         const params = frame.params ?? {}
         const deviceId = String(params.deviceId ?? '').trim()
+        // 探路：加入端在弹"选群组"的框之前，只想问一句"你这儿有哪些群"，不该
+        // 在主机上留下一条"连过又断了"的记录。回完就断，store 一个字节都不写。
+        if (params.probe === true) {
+          if (frame.id !== undefined) {
+            peer.send({
+              id: frame.id,
+              result: {
+                proto: 1, ok: true, hostName: 'DSH 主机',
+                groups: [], available: listGroups(rt), probe: true,
+              },
+            })
+          }
+          peer.close()
+          resolve({ nodeId: null, probe: true, groups: listGroups(rt), hostName: 'DSH 主机' })
+          return
+        }
         let record = store.list().find(node => deviceId !== '' && node.deviceId === deviceId)
         record = record === undefined
           ? await store.add({ name: String(params.name ?? '') || 'remote', ...(deviceId === '' ? {} : { deviceId }) })
           : await store.update(record.id, { name: String(params.name ?? record.name) })
         const nodeId = record.id
+        // workspace 是那台机器自己选的主文件夹。空着就不覆盖已有记录 ——
+        // Object.assign 会把 undefined 写上去，落盘时整条字段就没了。
+        const workspace = String(params.workspace ?? '').trim()
         await store.update(nodeId, {
           status: 'online',
           lastSeenAt: Date.now(),
           caps: Array.isArray(params.caps) ? params.caps : [],
+          ...(workspace === '' ? {} : { workspace: workspace.slice(0, 400) }),
         })
 
         // 回执里只给它**自己进了的**群，不是全部群。
         // 给全部的话，远端拿第一个就去发消息 —— 发到它根本不在的群里，主机只能拒，
         // 而那条拒绝以前连日志都没有，看着就是"消息发出去了但群里没有"。
+        // available 是另一回事：它要用来弹"选个群"的框，所以全都给。
         if (frame.id !== undefined) {
           const mine = (record.groups ?? [])
             .map(id => rt.roomOf?.(id))
             .filter(room => room !== undefined)
             .map(room => ({ id: room.id, name: room.name || room.id }))
-          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: mine } })
+          peer.send({ id: frame.id, result: { proto: 1, ok: true, nodeId, groups: mine, available: listGroups(rt) } })
         }
 
         peers.set(nodeId, peer)
+        peer.lastFrameAt = Date.now()
         const drop = () => {
           if (peers.get(nodeId) !== peer) return
           peers.delete(nodeId)
@@ -265,7 +305,10 @@ function installOnce(rt) {
             .catch(error => warn('dsbot-nodes: marking %s offline failed: %s', nodeId, error))
           emit(nodeId, 'node.offline', { nodeId })
         }
-        peer.on('frame', incoming => handleFrame(nodeId, incoming))
+        peer.on('frame', (incoming) => {
+          peer.lastFrameAt = Date.now()
+          handleFrame(nodeId, incoming)
+        })
         peer.on('close', drop)
         peer.on('bad-frame', error => warn('dsbot-nodes: %s sent a bad frame: %s', nodeId, error))
         peer.on('listener-error', error => warn('dsbot-nodes: %s 的帧处理出错：%s', nodeId, error))
@@ -275,6 +318,10 @@ function installOnce(rt) {
         // 不能只从下一句开始。放在回执之后异步做，不拖慢握手。
         void sendRecentLines(peer, record).catch(error =>
           warn('dsbot-nodes: 给 %s 补群消息失败：%s', nodeId, error?.message ?? error))
+        // 它连上时点了"进这些群"：握手一成功就替它建成员。
+        // autoBind 要等 api 建好才有，没建好先记着，installOnce 末尾补跑。
+        const wanted = Array.isArray(params.wantedGroups) ? params.wantedGroups.filter(id => typeof id === 'string') : []
+        if (wanted.length > 0) requestAutoBind(nodeId, wanted)
         // 上面几个 await 里对面可能就断了。close 早就发完了，我们的监听挂得太晚 ——
         // 不补这一刀，这台机器会被记成永远在线。
         if (peer.closed === true) drop()
@@ -409,6 +456,27 @@ function installOnce(rt) {
         warn('dsbot-nodes: %s 说话失败：%s', nodeId, error?.message ?? error))
       return
     }
+    // 加入端申请进群（连上之后在弹窗里选的）。回执带回哪些进去了、哪些被拒，
+    // 界面据此把没进去的群标出来，而不是"选了但没反应"。
+    if (frame.method === 'node.wants') {
+      if (wantsGroups === null) {
+        if (frame.id !== undefined) {
+          peers.get(nodeId)?.send({ id: frame.id, error: { code: 'node/starting', message: '主机还在启动，稍等一下再试' } })
+        }
+        return
+      }
+      void wantsGroups(nodeId, frame).catch(error =>
+        warn('dsbot-nodes: %s 申请进群失败：%s', nodeId, error?.message ?? error))
+      return
+    }
+    // 心跳里带着工作区：加入端换了主文件夹，主机这边不用等重连就知道。
+    if (frame.method === 'node.presence') {
+      const workspace = String(frame.params?.workspace ?? '').trim()
+      if (workspace !== '') {
+        store.update(nodeId, { workspace: workspace.slice(0, 400), lastSeenAt: Date.now() })
+          .catch(error => warn('dsbot-nodes: 记 %s 的工作区失败：%s', nodeId, error))
+      }
+    }
     if (frame.id !== undefined) {
       const peer = peers.get(nodeId)
       peer?.send({ id: frame.id, error: { code: 'node/unsupported', message: `主机不接 ${frame.method}` } })
@@ -480,6 +548,23 @@ ${links.join(' ')}`
   })
   void hosting.start().catch(error => warn(`远程节点监听没起来：${error.message}`))
 
+  // 心跳看门狗：对面 15 秒一条 node.presence，75 秒一帧都没有就当它掉了。
+  // 电脑合盖、进程被杀、网线拔掉这几种情况 TCP 不会立刻断，光等 close 会让群里
+  // 那条 Bot 一直"正在输入…"。按掉线处理 → 关连接 → 在途的轮次当场收尾。
+  const STALE_MS = 75_000
+  const watchdog = setInterval(() => {
+    const now = Date.now()
+    for (const [nodeId, peer] of peers) {
+      if (peer.closed === true) continue
+      const at = Number(peer.lastFrameAt ?? 0)
+      if (at === 0) continue
+      if (now - at <= STALE_MS) continue
+      warn('dsbot-nodes: %s 已经 %d 秒没有心跳，按掉线处理', nodeId, Math.round((now - at) / 1000))
+      try { peer.close() } catch {}
+    }
+  }, 20_000)
+  watchdog.unref?.()
+
   // 自愈：节点删了，它的代理 Bot 还留在群里。那种 Bot 的 model 指向一个已经不存在
   // 的 node，谁也用不了它，但它还占着成员位置、还能被 @ 到，界面上看着就像多了一个
   // 莫名其妙的"手机""手机测试"。每次加载扫一遍，把这种孤儿收掉。
@@ -544,6 +629,7 @@ ${links.join(' ')}`
   // 真正的清理只由 guard 决定何时执行。context 卸载时不能自己直接停：
   // 热重载里旧 context 的卸载可能晚于新实例就位，一停就把新实例也带走了。
   const dispose = () => {
+    clearInterval(watchdog)
     for (const peer of peers.values()) peer.close()
     peers.clear()
     // stop() 里关监听是同步的；返回的 promise 不该变成未处理的 rejection。
@@ -618,6 +704,13 @@ ${links.join(' ')}`
       return joiner.status()
     },
     joinStatus: () => joiner.status(),
+    // 加入端的三个动作，走设置页那几个口：
+    //   say         —— 以它自己那个成员的身份往主机的某个群说一句
+    //   want        —— 连上之后补选群（弹窗里点的那几个）
+    //   setWorkspace —— 换主文件夹，主机那边下一次心跳就知道
+    say: (text, groupId) => joiner.say(text, groupId),
+    want: groups => joiner.want(groups),
+    setWorkspace: dir => joiner.setWorkspace(dir),
     disconnect(nodeId) {
       const peer = peers.get(nodeId)
       if (peer === undefined) return false
@@ -625,6 +718,58 @@ ${links.join(' ')}`
       return true
     },
   }
+  // 握手时点好的群 + 连上之后弹窗里补点的群，都走这一条：建成员、推最近消息。
+  autoBind = async (nodeId, groups) => {
+    const node = store.node(nodeId)
+    if (node === undefined) return
+    for (const wanted of groups) {
+      const room = rt.roomOf?.(wanted)
+        ?? Object.values(rt.state?.rooms ?? {}).find(each => each.name === wanted)
+      if (room === undefined) {
+        warn('dsbot-nodes: 加入端想进的群不存在：%s', wanted)
+        continue
+      }
+      try {
+        await api.bind({ nodeId, groupId: room.id, name: node.name })
+      } catch (error) {
+        warn('dsbot-nodes: 把 %s 放进「%s」失败：%s', node.name, room.name, error?.message ?? error)
+      }
+    }
+  }
+  wantsGroups = async (nodeId, frame) => {
+    const peer = peers.get(nodeId)
+    const answer = payload => { if (frame.id !== undefined) peer?.send({ id: frame.id, ...payload }) }
+    const node = store.node(nodeId)
+    if (node === undefined) {
+      answer({ error: { code: 'node/not-found', message: '主机这边没有这台机器的记录' } })
+      return
+    }
+    const asked = Array.isArray(frame.params?.groups) ? frame.params.groups : []
+    const bound = []
+    const refused = []
+    for (const wanted of asked) {
+      if (typeof wanted !== 'string' || wanted === '') continue
+      const room = rt.roomOf?.(wanted)
+        ?? Object.values(rt.state?.rooms ?? {}).find(each => each.name === wanted)
+      if (room === undefined) {
+        refused.push({ id: wanted, reason: '没有这个群' })
+        continue
+      }
+      try {
+        const result = await api.bind({ nodeId, groupId: room.id, name: node.name })
+        bound.push({ id: room.id, name: room.name || room.id, botId: result.botId })
+      } catch (error) {
+        refused.push({ id: room.id, name: room.name || room.id, reason: error?.message ?? String(error) })
+      }
+    }
+    answer({ result: { ok: true, bound, refused } })
+  }
+  // 握手发生在 api 建好之前：那会儿记下的群现在补建。
+  for (const [nodeId, groups] of pendingAutoBind) {
+    pendingAutoBind.delete(nodeId)
+    void autoBind(nodeId, groups)
+  }
+
   rt.nodesApi = api
   registerTool(rt, api, resolveNode)
   registerRoutes(rt, api, hosting)
@@ -705,6 +850,9 @@ function registerRoutes(rt, api, hosting) {
             botName: node.botName ?? '',
             status: node.status ?? 'offline',
             caps: node.caps ?? [],
+            // 那台机器选的主文件夹。主机靠它知道"它的工作区在哪"，
+            // 也靠它给"浏览工作区"定根目录。
+            workspace: node.workspace ?? '',
             groups: (node.groups ?? []).map(id => {
               const room = rt.roomOf?.(id)
               return { id, name: room?.name ?? id }
@@ -729,11 +877,69 @@ function registerRoutes(rt, api, hosting) {
         const body = await readBody(req)
         return sendJson(res, 200, {
           ok: true,
-          join: await api.join({ code: body.code, name: body.name, agent: body.agent, cwd: body.cwd }),
+          join: await api.join({
+            code: body.code, name: body.name, agent: body.agent, cwd: body.cwd,
+            groups: body.groups,
+          }),
         })
       }
       if (req.method === 'POST' && path === '/api/nodes/leave') {
         return sendJson(res, 200, { ok: true, join: api.leave() })
+      }
+      // 弹窗里点的那几个群：交给主机去建成员，回执说明哪些进去了、哪些被拒。
+      if (req.method === 'POST' && path === '/api/nodes/join/wants') {
+        const body = await readBody(req)
+        const groups = Array.isArray(body.groups) ? body.groups.filter(each => typeof each === 'string') : []
+        return sendJson(res, 200, { ok: true, ...(await api.want(groups)) })
+      }
+      // 换主文件夹：不用重连，下一次心跳主机就知道。
+      if (req.method === 'POST' && path === '/api/nodes/join/workspace') {
+        const body = await readBody(req)
+        return sendJson(res, 200, { ok: true, join: await api.setWorkspace(body.path) })
+      }
+      // 加入端直接往主机的群里说话：落群走的是它自己那个成员身份。
+      if (req.method === 'POST' && path === '/api/nodes/say') {
+        const body = await readBody(req)
+        const text = String(body.text ?? '').trim()
+        if (text === '') return sendJson(res, 400, { ok: false, error: '要说什么？' })
+        return sendJson(res, 200, { ok: true, ...(await api.say(text, body.group)) })
+      }
+      // 选主文件夹用：只列本机目录，只读。不列隐藏目录，免得一屏 .git。
+      if (req.method === 'GET' && path === '/api/nodes/dirs') {
+        const wanted = url.searchParams.get('path') ?? ''
+        let base
+        try {
+          base = wanted === '' ? homedir() : resolve(wanted)
+        } catch {
+          return sendJson(res, 400, { ok: false, error: '这个路径不合法' })
+        }
+        const entries = await readdir(base, { withFileTypes: true }).catch(() => [])
+        const dirs = entries
+          .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+          .map(entry => entry.name)
+          .sort((a, b) => a.localeCompare(b))
+        const parent = dirname(base)
+        return sendJson(res, 200, { ok: true, path: base, parent: parent === base ? null : parent, dirs })
+      }
+      // 主机浏览那台机器的工作区：只是在它那儿跑 list_dir / read_file。
+      if (req.method === 'POST' && path === '/api/nodes/fs') {
+        const body = await readBody(req)
+        const node = api.resolveNode(body.node)
+        const action = body.op === 'read' ? 'read_file' : 'list_dir'
+        const result = await api.call(node.id, 'node.exec', {
+          execId: `fs-${Date.now()}`,
+          action,
+          args: { path: String(body.path ?? '.') },
+        }, { timeoutMs: 35_000 })
+        if (result?.ok === false) {
+          return sendJson(res, 200, { ok: false, error: result.message ?? result.code, workspace: node.workspace ?? '' })
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          output: String(result?.output ?? ''),
+          truncated: result?.truncated === true,
+          workspace: node.workspace ?? '',
+        })
       }
       if (req.method === 'POST' && path === '/api/nodes/rotate') {
         return sendJson(res, 200, { ok: true, ...(await hosting.rotate()) })

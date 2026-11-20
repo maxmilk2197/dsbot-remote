@@ -50,12 +50,25 @@ async function filePath(action, args, cwd) {
 export async function execute(request, context = {}) {
   const action = request?.action
   const args = request?.args ?? {}
-  const cwd = resolve(context.cwd ?? process.cwd())
+  const root = resolve(context.cwd ?? process.cwd())
   const limit = context.outputLimit ?? EXEC_OUTPUT_LIMIT
   const timeoutMs = context.timeoutMs ?? EXEC_TIMEOUT_MS
   const maxFileBytes = context.maxFileBytes ?? MAX_FILE_BYTES
 
   if (!accepts(action)) return failed('node/exec-denied', `${JSON.stringify(action)} 不在白名单里`)
+
+  // args.cwd 是"在这个工作区里挑一个子目录"：主机浏览工作区时用得上。
+  // 它只能往工作区里面走 —— 和文件路径同一条规则，越界就是拒绝。
+  const base = (() => {
+    const asked = args?.cwd
+    if (typeof asked !== 'string' || asked === '') return { cwd: root }
+    if (!withinRoot(root, asked)) {
+      return { error: failed('node/exec-denied', `${action}: cwd ${asked} 不在工作目录 ${root} 之内`) }
+    }
+    return { cwd: resolve(root, asked) }
+  })()
+  if (base.error !== undefined) return base.error
+  const cwd = base.cwd
 
   switch (action) {
     case 'read_file': {

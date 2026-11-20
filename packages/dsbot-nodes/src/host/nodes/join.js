@@ -24,7 +24,12 @@ const freePort = () => new Promise((resolve, reject) => {
 
 export function createJoiner({ home, rt, warn = () => {} }) {
   let peer = null
-  let info = { running: false, code: null, host: null, since: null, error: null }
+  // servePeer 返回的那套控制柄：说话、换工作区、申请进群。
+  let ctrl = null
+  let info = {
+    running: false, code: null, host: null, since: null, error: null,
+    hostName: '', workspace: '', groups: [], available: [],
+  }
   // 手机/另一台机器上的 ds-bot 里也出现这个群，消息双向（见 mirror.js）。
   const mirror = createMirror({ rt, warn })
   // 跨网用的虚拟网：广播出不了局域网，靠它把两台机器放进同一张网里。
@@ -38,6 +43,7 @@ export function createJoiner({ home, rt, warn = () => {} }) {
   function stop() {
     mirror.stop()
     stopNetwork()
+    ctrl = null
     if (peer !== null) {
       try { peer.close() } catch {}
       peer = null
@@ -45,13 +51,19 @@ export function createJoiner({ home, rt, warn = () => {} }) {
     info = { ...info, running: false }
   }
 
-  async function start({ code, name, agent, cwd } = {}) {
+  async function start({ code, name, agent, cwd, groups: wanted } = {}) {
     const clean = String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
     if (clean.length < 6) {
       throw Object.assign(new Error('配对码是 6 位'), { code: 'node/bad-params' })
     }
     stop()
-    info = { ...info, running: true, code: clean, error: null, host: null, since: Date.now() }
+    // 主文件夹：这台机器自己选的根，主机浏览、run_shell、相对路径都从这儿算。
+    const workspace = typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd()
+    const wantedGroups = Array.isArray(wanted) ? wanted.filter(each => typeof each === 'string' && each !== '') : []
+    info = {
+      ...info, running: true, code: clean, error: null, host: null, since: Date.now(),
+      hostName: '', workspace, groups: [], available: [],
+    }
     // 加入端自己的端口和实例名。跨网分支里的 waitForHostPeer / addPortForward
     // 一开始就要用，必须在这里声明 —— 放到分支后面会 TDZ：
     // Cannot access 'ports' before initialization。
@@ -95,16 +107,29 @@ export function createJoiner({ home, rt, warn = () => {} }) {
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
-      servePeer(peer, {
+      ctrl = servePeer(peer, {
         name: name !== undefined && name !== '' ? name : (found.host ?? '这台机器'),
         deviceId,
-        cwd: typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd(),
+        cwd: workspace,
+        wantedGroups,
         agent: typeof agent === 'string' && agent !== '' ? parseAgentCommand(agent) : undefined,
         onGroupLine: (params, lines) => {
           void mirror.write(params, lines).catch(error => warn(`镜像群写入失败：${error.message}`))
         },
         // 连上就把对方给的那些群在本地建出来，不用等第一条消息。
-        onGroups: groups => mirror.ensureAll(groups),
+        onGroups: (groups) => {
+          info = { ...info, groups }
+          return mirror.ensureAll(groups)
+        },
+        // 主机回了它叫什么、有哪些群可以进 —— 设置页的弹窗就靠这个列表。
+        onHostInfo: (hostInfo) => {
+          info = {
+            ...info,
+            hostName: String(hostInfo?.hostName ?? ''),
+            available: Array.isArray(hostInfo?.available) ? hostInfo.available : [],
+            groups: Array.isArray(hostInfo?.groups) ? hostInfo.groups : info.groups,
+          }
+        },
       })
       info = { ...info, running: true, host: url }
       mirror.bind(peer)
@@ -112,6 +137,7 @@ export function createJoiner({ home, rt, warn = () => {} }) {
       peer.on('close', () => {
         info = { ...info, running: false, error: '和主机断开了' }
         peer = null
+        ctrl = null
       })
       return { ...info }
     } catch (error) {
@@ -123,8 +149,36 @@ export function createJoiner({ home, rt, warn = () => {} }) {
   }
 
   function status() {
-    return { ...info }
+    return { ...info, groups: [...(info.groups ?? [])], available: [...(info.available ?? [])] }
   }
 
-  return { start, stop, status }
+  const offline = () => Object.assign(new Error('还没连上主机'), { code: 'node/offline' })
+
+  // 以这台机器在群里那个成员的身份说一句。没连上就明说，不静默丢。
+  async function say(text, groupId) {
+    if (ctrl === null) throw offline()
+    const result = await ctrl.say(text, typeof groupId === 'string' && groupId !== '' ? groupId : undefined)
+    return { result, join: status() }
+  }
+
+  // 换主文件夹：下一次心跳主机就收到，不用重连。
+  function setWorkspace(dir) {
+    if (ctrl === null) throw offline()
+    const next = ctrl.setWorkspace(String(dir ?? '').trim())
+    info = { ...info, workspace: next.workspace }
+    return status()
+  }
+
+  // 弹窗里点的那几个群：交给主机建成员，回执说清哪些进去了、哪些没成。
+  async function want(groups) {
+    if (ctrl === null) throw offline()
+    const result = await ctrl.want(groups)
+    return {
+      bound: Array.isArray(result?.bound) ? result.bound : [],
+      refused: Array.isArray(result?.refused) ? result.refused : [],
+      join: status(),
+    }
+  }
+
+  return { start, stop, status, say, setWorkspace, want }
 }

@@ -121,22 +121,93 @@ async function collectAttachments(text) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGroupLine, onGroups }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
-  peer.send({ id: 'hello', method: 'node.hello', params: { name, deviceId, caps } })
+  // 工作区：这台机器选定的主文件夹。握手就报给主机，主机据此浏览它的文件；
+  // 之后换了也只需要一条心跳，不用重连。
+  let workspace = typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd()
+  const wanted = Array.isArray(wantedGroups) ? wantedGroups.filter(each => typeof each === 'string' && each !== '') : []
+  peer.send({
+    id: 'hello',
+    method: 'node.hello',
+    params: {
+      name, deviceId, caps, workspace,
+      ...(wanted.length === 0 ? {} : { wantedGroups: wanted }),
+    },
+  })
   const turns = new Map()
   let groups = []
+  let available = []
   let postSeq = 0
+  // 发出去等回答的帧（node.post / node.wants）。带 id 的请求必须有回执，
+  // 否则界面点了"进群"永远转圈。
+  const waiting = new Map()
+
+  const ask = (method, params, timeoutMs = 20_000) => new Promise((resolve, reject) => {
+    postSeq += 1
+    const id = `ask-${postSeq}`
+    const timer = setTimeout(() => {
+      waiting.delete(id)
+      reject(new Error(`${method} 超过 ${timeoutMs}ms 没有回答`))
+    }, timeoutMs)
+    timer.unref?.()
+    waiting.set(id, { resolve, reject, timer })
+    try {
+      peer.send({ id, method, params })
+    } catch (error) {
+      clearTimeout(timer)
+      waiting.delete(id)
+      reject(error)
+    }
+  })
+
+  // 心跳：15 秒一条。主机靠它区分"还活着但没说话"和"电脑睡了 / 进程没了"。
+  // 少了这条，一条半死的 TCP 会让群里那条 Bot 一直显示"正在输入…"。
+  let beat = null
+  const startBeat = () => {
+    if (beat !== null) return
+    beat = setInterval(() => {
+      try {
+        peer.send({ method: 'node.presence', params: { state: 'online', workspace } })
+      } catch {
+        /* 断了就算了，close 会把它收掉 */
+      }
+    }, 15_000)
+    beat.unref?.()
+  }
+  startBeat()
 
   // 往群里说一句话。主机侧走 node.post，以这台机器在群里的那个 Bot 的身份落进群，
-  // 和主机自己发消息走同一条路。
-  const postText = (text) => {
-    const group = groups[0]
-    if (group === undefined) { say('还没进任何群，这句话没发出去'); return }
-    postSeq += 1
-    peer.send({ id: `post-${postSeq}`, method: 'node.post', params: { groupId: group.id, text } })
-    say(`发到「${group.name}」：${text}`)
+  // 和主机自己发消息走同一条路。groupId 缺省时说给"我进的第一个群"。
+  const postText = (text, groupId) => {
+    const body = String(text ?? '').trim()
+    if (body === '') return Promise.reject(new Error('要说什么？'))
+    const group = groupId === undefined
+      ? groups[0]
+      : groups.find(each => each.id === groupId || each.name === groupId) ?? { id: groupId, name: groupId }
+    if (group === undefined) return Promise.reject(new Error('还没进任何群'))
+    return ask('node.post', { groupId: group.id, text: body }).then((result) => {
+      say(`发到「${group.name}」：${body}`)
+      return result
+    })
+  }
+
+  // 给设置页用的三个口：说话、换工作区、申请进群。
+  const controller = {
+    say: (text, groupId) => postText(text, groupId),
+    setWorkspace(dir) {
+      const next = String(dir ?? '').trim()
+      if (next !== '') workspace = next
+      try { peer.send({ method: 'node.presence', params: { state: 'online', workspace } }) } catch {}
+      say(`工作区 ${workspace}`)
+      return { workspace }
+    },
+    want(ids) {
+      const list = (Array.isArray(ids) ? ids : []).filter(each => typeof each === 'string' && each !== '')
+      if (list.length === 0) return Promise.resolve({ ok: true, bound: [], refused: [] })
+      return ask('node.wants', { groups: list }, 30_000)
+    },
   }
 
   // 本地信箱：这台机器上的别的进程（另一个 agent、一个脚本、你自己）想说话，
@@ -150,12 +221,16 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGr
         while (at >= 0) {
           const line = buffer.slice(0, at).trim()
           buffer = buffer.slice(at + 1)
-          if (line !== '') postText(line)
+          if (line !== '') postText(line).catch(error => say(`这句话没发出去：${error.message}`))
           at = buffer.indexOf('\n')
         }
       }
       socket.on('data', (chunk) => { buffer += chunk; drain() })
-      socket.on('end', () => { const rest = buffer.trim(); buffer = ''; if (rest !== '') postText(rest) })
+      socket.on('end', () => {
+        const rest = buffer.trim()
+        buffer = ''
+        if (rest !== '') postText(rest).catch(error => say(`这句话没发出去：${error.message}`))
+      })
       socket.on('error', () => {})
     })
     server.on('error', (error) => {
@@ -171,15 +246,42 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGr
 
   peer.on('frame', async (frame) => {
     if (frame?.id === 'hello') {
-      if (Array.isArray(frame.result?.groups)) {
-        groups = frame.result.groups
+      // 主机回执：它叫什么、这台机器已经进了哪些群、还有哪些群可以进。
+      const result = frame.result ?? {}
+      if (Array.isArray(result.groups)) {
+        groups = result.groups
         if (groups.length > 0) say(`在群里：${groups.map(group => group.name).join('、')}`)
         // 加入端要把这些群在本地也建出来（镜像群），不然群列表里看不到。
         if (typeof onGroups === 'function') {
           Promise.resolve(onGroups(groups)).catch(error => say(`建镜像群失败：${error.message}`))
         }
       }
+      if (Array.isArray(result.available)) {
+        available = result.available
+        if (available.length > 0) say(`主机那边有 ${available.length} 个群可以进：${available.map(group => group.name).join('、')}`)
+      }
+      if (frame.error !== undefined) say(`主机拒绝了握手：${frame.error.message ?? frame.error.code}`)
+      if (typeof onHostInfo === 'function') {
+        try {
+          onHostInfo({
+            hostName: String(result.hostName ?? ''),
+            groups, available, nodeId: result.nodeId,
+          })
+        } catch (error) {
+          say(`回调出错：${error.message}`)
+        }
+      }
       return
+    }
+    // 等着的请求有回答了（node.post / node.wants）：交给它。
+    if (frame?.id !== undefined) {
+      const waiter = waiting.get(frame.id)
+      if (waiter !== undefined) {
+        clearTimeout(waiter.timer)
+        waiting.delete(frame.id)
+        if (frame.error !== undefined) waiter.reject(new Error(frame.error.message ?? frame.error.code))
+        else waiter.resolve(frame.result)
+      }
     }
     // error 要说出来：发消息被拒的时候，日志里得有一句为什么。
     if (frame?.id !== undefined && frame.error !== undefined) {
@@ -281,8 +383,19 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGr
     }
   })
 
-  peer.on('close', () => say(`断开 ${peer.remote}`))
+  peer.on('close', () => {
+    if (beat !== null) clearInterval(beat)
+    beat = null
+    // 断线时还等着的请求必须有下落：不然界面上"进群"那一栏会一直转圈。
+    for (const [, waiter] of waiting) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('和主机断开了'))
+    }
+    waiting.clear()
+    say(`断开 ${peer.remote}`)
+  })
   peer.on('bad-frame', error => say(`坏帧：${error.message}`))
+  return controller
 }
 
 async function startListen(args) {
