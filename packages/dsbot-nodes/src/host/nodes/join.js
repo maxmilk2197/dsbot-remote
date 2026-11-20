@@ -52,6 +52,10 @@ export function createJoiner({ home, rt, warn = () => {} }) {
     }
     stop()
     info = { ...info, running: true, code: clean, error: null, host: null, since: Date.now() }
+    // 加入端自己的端口和实例名。跨网分支里的 waitForHostPeer / addPortForward
+    // 一开始就要用，必须在这里声明 —— 放到分支后面会 TDZ：
+    // Cannot access 'ports' before initialization。
+    const ports = instancePorts(clean, 'join')
 
     try {
       // 先在局域网里喊一嗓子，谁认这个码谁应。
@@ -88,7 +92,6 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         found = { host: '127.0.0.1', port: localPort, name: `虚拟网 → ${target.address}:${hostPort}` }
         warn(`虚拟网就绪（${ready?.ipv4 ?? '?'}）→ 127.0.0.1:${localPort} 转 ${target.address}:${hostPort}`)
       }
-      const ports = instancePorts(clean, 'join')
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
