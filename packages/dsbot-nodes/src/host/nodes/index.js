@@ -33,6 +33,7 @@ try {
 } catch {
   defineTool = definition => definition
 }
+import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -253,6 +254,9 @@ function installOnce(rt) {
         // 节点 id 由主机分配（store 生成 n-xxxxxxxx），远端只报自己的 deviceId 与名字。
         // 同一个 deviceId 再连上来是重连，不是新机器。
         const params = frame.params ?? {}
+        // 远端带上来的续传点：每个群它已经有到第几条。只用来补缺口，不落盘 ——
+        // 每次重连都会重新报一遍，存下来反而会过期。
+        const cursors = params.cursors !== null && typeof params.cursors === 'object' ? params.cursors : {}
         const deviceId = String(params.deviceId ?? '').trim()
         // 先把盘上的记录读出来再查找：list() 在 load 之前一律返回空数组，
         // 拿空数组去找 deviceId 会把同一台机器当成新机器，凭空多建一条记录
@@ -302,7 +306,7 @@ function installOnce(rt) {
             .map(room => ({ id: room.id, name: room.name || room.id }))
           peer.send({
             id: frame.id,
-            result: { proto: 1, ok: true, hostName: 'DSH 主机', nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
+            result: { proto: 1, ok: true, hostName: 'DSH 主机', hostId: HOST_ID, nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
           })
         }
 
@@ -327,7 +331,7 @@ function installOnce(rt) {
         emit(nodeId, 'node.online', { nodeId, name: record?.name ?? nodeId })
         // 连上就把最近的群消息铺给它：手机那边要"像正常群聊那样"，一进来就得有上下文，
         // 不能只从下一句开始。放在回执之后异步做，不拖慢握手。
-        void sendRecentLines(peer, record).catch(error =>
+        void sendRecentLines(peer, record, cursors).catch(error =>
           warn('dsbot-nodes: 给 %s 补群消息失败：%s', nodeId, error?.message ?? error))
         // 它连上时点了"进这些群"：握手一成功就替它建成员。
         // autoBind 要等 api 建好才有，没建好先记着，installOnce 末尾补跑。
@@ -352,6 +356,9 @@ function installOnce(rt) {
   // 群聊镜像：让远端像正常群聊一样看到消息流。
   // 只读推送，不写远端任何东西 —— 远端的发言仍然走 node.post 回来。
   const LINE_TAIL = 15
+  // 主机自己的身份：两台主机可能有同名群，远端靠它区分镜像群，不靠群名。
+  // 用 home 路径的哈希：同一条安装重连、重启都不变，也不需要额外落盘一个 id。
+  const HOST_ID = createHash('sha256').update(String(rt.home ?? 'dsbot-nodes')).digest('hex').slice(0, 8)
 
   const lineOf = record => ({
     seq: record.seq,
@@ -362,19 +369,33 @@ function installOnce(rt) {
     kind: record.kind,
   })
 
-  const sendRecentLines = async (peer, record) => {
+  const sendRecentLines = async (peer, record, cursors = {}) => {
     if (typeof rt.groupLinesAfter !== 'function') return
     const current = store.node(record.id) ?? record
     for (const groupId of current.groups ?? []) {
       if (!isAllowedIn(current, groupId)) continue
       const room = rt.roomOf?.(groupId)
       if (room === undefined) continue
-      const all = await rt.groupLinesAfter(groupId, 0).catch(() => [])
-      const tail = (all ?? []).slice(-LINE_TAIL).map(lineOf).filter(line => line.text !== '')
+      // 成员表是最后一道：本地把这条 Bot 从群里删了，就不该再收内容。
+      if (current.botId !== undefined && !(room.members ?? []).includes(current.botId)) continue
+      // 远端会带上它已经收到哪儿（node.hello.cursors）：只补它缺的那一段。
+      // 没带（旧节点 / 第一次连）才从 0 开始，并靠 seq 让它在本地去重。
+      const since = Number(cursors?.[groupId])
+      const from = Number.isFinite(since) && since > 0 ? Math.floor(since) : 0
+      const all = await rt.groupLinesAfter(groupId, from).catch(() => [])
+      // 先筛空行再截尾：顺序反了的话空消息会占掉名额，补的历史不足 LINE_TAIL 条。
+      const tail = (all ?? []).map(lineOf).filter(line => line.text !== '').slice(-LINE_TAIL)
+      const lastSeq = tail.length === 0 ? from : Number(tail[tail.length - 1].seq)
+      const cursor = Number.isFinite(lastSeq) && lastSeq > 0 ? Math.floor(lastSeq) : from
       // 空的群也要发：加入端靠这条消息把群在本地建出来，不然群列表里看不到。
       peer.send({
         method: 'group.snapshot',
-        params: { room: { id: room.id, name: room.name || room.id }, lines: tail, cursor: 0 },
+        params: {
+          room: { id: room.id, name: room.name || room.id },
+          lines: tail,
+          cursor,
+          hostId: HOST_ID,
+        },
       })
     }
   }
@@ -663,6 +684,8 @@ ${links.join(' ')}`
         const node = store.node(nodeId)
         // 授权被收回的群，一条消息都不再推给它。
         if (node === undefined || !isAllowedIn(node, room.id)) continue
+        // 授权还在、但成员已经被从群里删掉：同样不该再看到群里的新消息。
+        if (node.botId !== undefined && !(room.members ?? []).includes(node.botId)) continue
         if (peer.closed === true) continue
         // 它自己刚说的话不用推回去（它当场就打印过了），免得每条都出现两遍。
         if (line.botId !== undefined && line.botId === node.botId) continue
@@ -670,7 +693,7 @@ ${links.join(' ')}`
           // 协议里 room 是对象、cursor 是必填：两个老字段留着兼容旧节点，新的补齐。
           peer.send({
             method: 'group.line',
-            params: { room: { id: room.id, name: room.name || room.id }, roomId: room.id, roomName: room.name, cursor: line.seq, lines: [line] },
+            params: { room: { id: room.id, name: room.name || room.id }, roomId: room.id, roomName: room.name, cursor: line.seq, hostId: HOST_ID, lines: [line] },
           })
         } catch (error) {
           warn('dsbot-nodes: 推群消息给 %s 失败：%s', nodeId, error?.message ?? error)

@@ -31,7 +31,7 @@ export const METHODS = Object.freeze({
       required: { nodeId: 'string', hostName: 'string', proto: 'integer' },
       // groups 是"它自己已经进了的群"；available 是"主机上有哪些群可以进"。
       // 加入端靠 available 弹那个选群组的框。
-      optional: { groups: 'array', available: 'array' },
+      optional: { groups: 'array', available: 'array', hostId: 'string' },
     },
   },
 
@@ -63,7 +63,8 @@ export const METHODS = Object.freeze({
         lines: 'array',
         cursor: 'integer',
       },
-      optional: {},
+      // hostId：两台主机可能有同名群，远端靠它给镜像群定身份。
+      optional: { hostId: 'string' },
     },
     result: { required: { ok: 'boolean' }, optional: {} },
   },
@@ -75,7 +76,7 @@ export const METHODS = Object.freeze({
     summary: '增量镜像。只有 allowRemoteMember 打开的群才会收到',
     params: {
       required: { lines: 'array', cursor: 'integer' },
-      optional: {},
+      optional: { hostId: 'string', roomId: 'string', roomName: 'string', room: 'object' },
     },
     result: null,
   },
