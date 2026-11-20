@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:net'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { install, resetInstall } from '../src/host/nodes/index.js'
 import { servePeer } from '../src/node/cli.js'
@@ -229,6 +230,29 @@ test('⑨ 协议形状：hello 带回主机名，带 id 的事件不报 unsuppor
     assert.equal(reply.result?.ok, true)
     raw.close()
   })
+})
+
+test('⑩ 端口被占也能起来：自动挪档位', async () => {
+  // 真实场景：同一台机器上另一个 DSH 实例或没退干净的旧进程占着 7777。
+  // 以前整个远程功能直接起不来，现在往后挪一格，端口由广播告诉对端。
+  resetInstall()
+  const home = await mkdtemp(join(tmpdir(), 'ops-port-'))
+  const blocker = createServer()
+  await new Promise(resolve => blocker.listen(0, '0.0.0.0', resolve))
+  const busy = blocker.address().port
+  try {
+    const api = install(makeHostRt({ home, posted: [] }))
+    const hosted = await api.hosting.start({ port: busy })
+    assert.notEqual(hosted.port, busy, '要挪开被占的端口')
+    assert.ok(hosted.port > 0)
+    const peer = await connectTcp({ url: `tcp://127.0.0.1:${hosted.port}`, token: hosted.code })
+    assert.ok(peer, '挪过去之后仍然连得上')
+    peer.close()
+    await api.hosting.stop?.()
+  } finally {
+    blocker.close()
+    await rm(home, { recursive: true, force: true }).catch(() => {})
+  }
 })
 
 test('⑧ 换码：新码能连，旧码立刻失效', async () => {

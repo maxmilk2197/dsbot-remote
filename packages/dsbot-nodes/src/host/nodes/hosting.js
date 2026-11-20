@@ -53,29 +53,43 @@ export function createHosting({
     // 真被别的程序占着再报一句清楚的话，别让 EADDRINUSE 变成莫名的启动失败。
     let server
     let lastError
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      try {
-        server = await listenTcp({
-          port: wantedPort,
-          host: '0.0.0.0',
-          token: chosen,
-          // 远端连上又立刻断开是家常便饭。这个回调的返回值没人接，任何 rejection
-          // 都会变成宿主的 fatal error，所以这里必须自己兜住。
-          onConnection: peer => {
-            Promise.resolve(attach(peer)).catch(error => warn(`握手没成：${error?.message ?? error}`))
-          },
-        })
-        break
-      } catch (error) {
-        lastError = error
-        if (error?.code !== 'EADDRINUSE' || attempt === 3) break
-        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)))
+    // 7777 被别的程序占着（同一台机器上很常见：另一个 DSH 实例、没退干净的旧进程）
+    // 不该让整个远程功能起不来。往后挪两个固定档位再试：端口由广播原样告诉对端，
+    // 所以局域网里对端不用改任何东西；跨网才需要 --to ip:端口。
+    // 最后一个候选是 0：让系统随便给一个。宁可端口不固定，也不要"功能起不来"。
+    const candidates = [wantedPort, wantedPort + 10_000, wantedPort + 20_000, 0].filter(port => port === 0 || port <= 65_535)
+    for (const candidate of candidates) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          server = await listenTcp({
+            port: candidate,
+            host: '0.0.0.0',
+            token: chosen,
+            // 远端连上又立刻断开是家常便饭。这个回调的返回值没人接，任何 rejection
+            // 都会变成宿主的 fatal error，所以这里必须自己兜住。
+            onConnection: peer => {
+              Promise.resolve(attach(peer)).catch(error => warn(`握手没成：${error?.message ?? error}`))
+            },
+          })
+          break
+        } catch (error) {
+          lastError = error
+          if (error?.code !== 'EADDRINUSE' || attempt === 3) break
+          await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)))
+        }
       }
+      if (server !== undefined) {
+        if (candidate !== wantedPort) {
+          warn(`端口 ${wantedPort} 被占用，改在 ${candidate} 等；局域网广播会自动带上这个端口，跨网请用 --to <主机>:${candidate}`)
+        }
+        break
+      }
+      if (lastError?.code !== 'EADDRINUSE') break
     }
     if (server === undefined) {
       if (lastError?.code === 'EADDRINUSE') {
         throw Object.assign(
-          new Error(`端口 ${wantedPort} 被占用：可能还开着另一个 DSH 实例或旧实例没退干净，只保留一个即可`),
+          new Error(`端口 ${candidates.join('/')} 都被占用：可能还开着别的 DSH 实例或旧实例没退干净`),
           { code: 'EADDRINUSE' })
       }
       throw lastError

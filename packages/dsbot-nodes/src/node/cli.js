@@ -545,7 +545,21 @@ async function runPair(args) {
     }
     say(`找到 ${host.name || '主机'} ${host.host}:${host.port}`)
 
-    const peer = await connectTcp({ url: `tcp://${host.host}:${host.port}`, token: code })
+    // 主机那边 7777 被占时会自动往 17777/27777 挪（广播会带上真实端口，
+    // 所以只有跨网这条硬编码路径需要挨个试）。
+    let peer
+    let lastConnectError
+    const ports = [...new Set([host.port, 17777, 27777].filter(port => Number(port) > 0))]
+    for (const port of ports) {
+      try {
+        peer = await connectTcp({ url: `tcp://${host.host}:${port}`, token: code })
+        if (port !== host.port) say(`主机在 ${port} 上（${host.port} 没响应）`)
+        break
+      } catch (error) {
+        lastConnectError = error
+      }
+    }
+    if (peer === undefined) throw lastConnectError ?? new Error('连不上主机')
     say('已连上')
     // 断线不要让人去猜：同一条命令再跑一次就是重连，配对码不变。
     peer.on('close', () => say('连接断了。同一条命令再跑一次就重连（配对码不变）。'))
