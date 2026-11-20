@@ -302,7 +302,7 @@ function installOnce(rt) {
             .map(room => ({ id: room.id, name: room.name || room.id }))
           peer.send({
             id: frame.id,
-            result: { proto: 1, ok: true, nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
+            result: { proto: 1, ok: true, hostName: 'DSH 主机', nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
           })
         }
 
@@ -447,8 +447,10 @@ function installOnce(rt) {
       refuse('node/unsupported', '这个版本的 ds-bot 不支持代发')
       return
     }
-    await rt.postToRoom(room, bot, text)
-    answer({ result: { ok: true, groupId: room.id, at: Date.now() } })
+    const posted = await rt.postToRoom(room, bot, text)
+    // seq 是这条消息在群里的序号：加入端拿它去重、显示"第几条"，
+    // 协议里它是回执的必填字段，缺了对面只能自己编一个。
+    answer({ result: { ok: true, groupId: room.id, at: Date.now(), seq: posted?.seq ?? posted?.record?.seq } })
     warn('dsbot-nodes: %s 在「%s」说了一句', bot.name ?? nodeId, room.name)
   }
 
@@ -517,7 +519,11 @@ function installOnce(rt) {
     }
     if (frame.id !== undefined) {
       const peer = peers.get(nodeId)
-      peer?.send({ id: frame.id, error: { code: 'node/unsupported', message: `主机不接 ${frame.method}` } })
+      // 方法认识、方向也对，只是这台主机没有对应的处理：收下、记一笔、回一句
+      // "收到了，不处理"。以前一律回 unsupported，结果老老实实按协议带 id 发
+      // turn.result 的节点反而当场失败 —— 协议写对了不通，写错了才通。
+      peer?.send({ id: frame.id, type: 'rpc.response', result: { ok: true, ignored: true } })
+      emit(nodeId, frame.method, frame.params)
       return
     }
     emit(nodeId, frame.method, frame.params)
@@ -661,7 +667,11 @@ ${links.join(' ')}`
         // 它自己刚说的话不用推回去（它当场就打印过了），免得每条都出现两遍。
         if (line.botId !== undefined && line.botId === node.botId) continue
         try {
-          peer.send({ method: 'group.line', params: { roomId: room.id, roomName: room.name, lines: [line] } })
+          // 协议里 room 是对象、cursor 是必填：两个老字段留着兼容旧节点，新的补齐。
+          peer.send({
+            method: 'group.line',
+            params: { room: { id: room.id, name: room.name || room.id }, roomId: room.id, roomName: room.name, cursor: line.seq, lines: [line] },
+          })
         } catch (error) {
           warn('dsbot-nodes: 推群消息给 %s 失败：%s', nodeId, error?.message ?? error)
         }
@@ -1372,6 +1382,11 @@ function registerTool(rt, api, resolveNode) {
           if (result.output !== undefined) parts.push(String(result.output))
           if (result.entry !== undefined) parts.push(JSON.stringify(result.entry))
           if (result.path !== undefined) parts.push(`落在 ${result.path}`)
+          // push_file 回的是 files[]，不是 entry/path：以前这里读错字段，
+          // 工具输出只剩一个"成功"，落点根本没显示出来。
+          if (Array.isArray(result.files) && result.files.length > 0) {
+            parts.push(result.files.map(file => `落在 ${file.path}`).join('\n'))
+          }
           return parts.join('\n')
         }
         return `不认识的 action：${action || '（空）'}`

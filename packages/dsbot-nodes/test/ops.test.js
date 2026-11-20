@@ -210,6 +210,27 @@ test('⑤ 附件回传：模型写 @@attach，节点把文件当载荷带回去'
   })
 })
 
+test('⑨ 协议形状：hello 带回主机名，带 id 的事件不报 unsupported', async () => {
+  await withPair(async ({ hosted }) => {
+    const raw = await connectTcp({ url: `tcp://127.0.0.1:${hosted.port}`, token: hosted.code })
+    const frames = []
+    raw.on('frame', frame => frames.push(frame))
+    raw.send({ id: 'h1', method: 'node.hello', params: { proto: 1, nodeName: '探针', botId: 'b-probe', botName: '探针', deviceId: 'dev-probe' } })
+    await until(() => frames.some(frame => frame.id === 'h1'))
+    const hello = frames.find(frame => frame.id === 'h1')
+    assert.equal(hello.result?.hostName, 'DSH 主机', '加入端要靠它显示"连到了哪台机器"')
+    assert.ok(hello.result?.nodeId, '要给出节点 id')
+
+    // 事件类方法按协议带 id 发：主机可以说不处理，但不能说"不接"。
+    raw.send({ id: 'r1', method: 'node.presence', params: { state: 'online' } })
+    await until(() => frames.some(frame => frame.id === 'r1'))
+    const reply = frames.find(frame => frame.id === 'r1')
+    assert.equal(reply.error, undefined, JSON.stringify(reply.error ?? {}))
+    assert.equal(reply.result?.ok, true)
+    raw.close()
+  })
+})
+
 test('⑧ 换码：新码能连，旧码立刻失效', async () => {
   await withPair(async ({ api, hosted }) => {
     const before = hosted.code
