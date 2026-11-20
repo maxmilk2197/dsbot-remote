@@ -115,9 +115,14 @@ export async function deviceIdentity(name) {
 // 模型说"文件在这"的最简形式：单独一行 `@@attach D:/work/report.md`。
 // 不扫目录、不猜"这一轮改了什么"——那两条都会把无关文件带进群。
 const ATTACH_BYTES = 3 * 1024 * 1024
+// 一帧的硬上限是 8MiB。base64 胀 4/3，再套 JSON 外壳，所以要留余量。
+// 原来只卡单文件 3MiB：十个文件就能拼出 40MiB 的帧，send() 直接回 false，
+// 整轮结果连文字一起被安静丢掉。现在按总量再卡一道。
+const ATTACH_TOTAL_BYTES = 5 * 1024 * 1024
 
-async function collectAttachments(text, root) {
+export async function collectAttachments(text, root) {
   const found = []
+  let total = 0
   for (const match of String(text ?? '').matchAll(/^@@attach[ 	]+(.+)$/gm)) {
     const target = match[1].trim().replace(/^["'<]|["'>]$/g, '')
     if (target === '') continue
@@ -131,7 +136,12 @@ async function collectAttachments(text, root) {
       const info = await stat(target)
       if (!info.isFile()) { say(`跳过 ${target}：不是文件`); continue }
       if (info.size > ATTACH_BYTES) { say(`跳过 ${target}：${info.size} 字节，超过 ${ATTACH_BYTES}`); continue }
+      if (total + info.size > ATTACH_TOTAL_BYTES) {
+        say(`跳过 ${target}：这一轮附件总量已经到 ${ATTACH_TOTAL_BYTES} 字节上限`)
+        continue
+      }
       const data = await readFile(target)
+      total += data.length
       found.push({ name: basename(target), size: data.length, data: data.toString('base64') })
     } catch (error) {
       say(`跳过 ${target}：${error.message}`)
@@ -424,17 +434,32 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
       // 这一轮要带出去的文件：模型把 `@@attach <路径>` 单独写一行，就是"这个文件给他看"。
       const files = await collectAttachments(result.text, workspace)
       if (files.length > 0) say(`带走 ${files.length} 个文件：${files.map(f => f.name).join('、')}`)
-      peer.send({
+      // 协议里的枚举是 ok / error / cancelled，没有 'failed'。
+      const status = result.ok ? 'ok' : result.aborted ? 'cancelled' : 'error'
+      const sent = peer.send({
         method: 'turn.result',
         params: {
           turnId,
-          // 协议里的枚举是 ok / error / cancelled，没有 'failed'。
-          status: result.ok ? 'ok' : result.aborted ? 'cancelled' : 'error',
+          status,
           text: result.text,
           message: result.message,
           ...(files.length > 0 ? { files } : {}),
         },
       })
+      // 帧超限时 send() 只回 false，不抛。带着附件发不出去的话，宁可丢附件也要把
+      // 文字送到 —— 否则主机那边看到的就是"这一轮永远不结束"。
+      if (sent === false && files.length > 0) {
+        say('附件太大，这一轮只发文字')
+        peer.send({
+          method: 'turn.result',
+          params: {
+            turnId,
+            status,
+            text: `${result.text ?? ''}\n（${files.length} 个附件太大，没发出去）`,
+            message: result.message,
+          },
+        })
+      }
       return
     }
 
