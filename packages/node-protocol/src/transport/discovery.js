@@ -1,23 +1,34 @@
 // 本文件由 AI 生成，请勿用于生产环境。
 /**
- * 局域网配对发现（UDP 广播）
+ * 局域网配对发现（UDP 广播）—— 默认关闭
  * ============================================================================
- * 目的：让"输入配对码"这一个动作足够。远程不该知道 IP、端口、令牌。
+ * 为什么默认关：上一版的问询包把配对码明文发到广播地址上。同网段任何人抓一个
+ * UDP 包就拿到了配对码，而配对码同时是会话密钥的盐 —— 等于整条连接被人接管；
+ * 广播本身也没有认证，谁都能抢先回一句 pair.ok 把对端引到自己的机器上。
+ * 办公室、园区、咖啡馆这类"不可信局域网"里，这一条不能默认开着。
+ *
+ * 显式打开之后（--lan 或 DSBOT_NODES_LAN_DISCOVERY=1）：
+ *   · 问询包里不再带配对码，只问"这张网里有 dsbot 主机吗"
+ *   · 主机答 { name, port }，代价是同一张网的人知道"这里有个主机"
+ *   · 码的校验全部留给 TCP 握手（X25519 + HMAC，且按来源限速）
  *
  * 流程：
- *   主机  listen({code})      → 绑 UDP 47821，等 pair 问询
- *   远程  findHost({code})    → 往广播地址发 { t:'pair', code }
- *   主机  码对 → 回 { t:'pair.ok', name, port }（**不回令牌**，码本身就是凭证）
- *   远程  拿 host+port → 用码当 token 走正常的 TCP 握手
- *
- * 为什么码能当令牌：TCP 层的 gate 校验的就是同一个码，多一条通路就多一个泄漏面。
- * 限速：同一 IP 每分钟 5 次，错了也照常回 reject（不泄露"码存在但不对"的时序差异）。
+ *   主机  listenDiscovery({ port, name }) → 绑 UDP 47821
+ *   远程  findHost()                      → 广播 { magic, t:'pair' }
+ *   主机  限速通过 → 回 { magic, t:'pair.ok', name, port }
+ *   远程  拿 host+port，再用配对码走 TCP 握手
  */
 import dgram from 'node:dgram'
 import os from 'node:os'
 
 export const DISCOVERY_PORT = 47821
-export const DISCOVERY_MAGIC = 'dsbot-nodes/1'
+export const DISCOVERY_MAGIC = 'dsbot-nodes/2'
+
+/** 广播发现是不是被显式打开了。默认关。 */
+export function discoveryEnabled(options = {}) {
+  if (options.lan === true) return true
+  return process.env.DSBOT_NODES_LAN_DISCOVERY === '1'
+}
 
 /** 本机所有 IPv4 网卡的 /24 广播地址 + 全局广播。 */
 export function broadcastAddresses() {
@@ -32,14 +43,11 @@ export function broadcastAddresses() {
   return [...out]
 }
 
-const normalize = (code) => String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
-
 /**
- * 主机侧：应答配对问询。
+ * 主机侧：应答配对问询。调用方负责判断要不要开（见 discoveryEnabled）。
  * @returns {Promise<{ close: () => void, port: number }>}
  */
 export async function listenDiscovery({
-  code,
   port,
   name = '',
   udpPort = DISCOVERY_PORT,
@@ -48,7 +56,6 @@ export async function listenDiscovery({
 }) {
   const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
   const attempts = new Map()
-  const wanted = normalize(code)
 
   socket.on('message', (buf, rinfo) => {
     let msg
@@ -65,19 +72,11 @@ export async function listenDiscovery({
     hits.push(now)
     attempts.set(rinfo.address, hits)
 
-    const reply = (body) => {
-      try {
-        socket.send(JSON.stringify({ magic: DISCOVERY_MAGIC, ...body }), rinfo.port, rinfo.address)
-      } catch (error) {
-        warn?.(`发现应答发送失败：${error.message}`)
-      }
+    try {
+      socket.send(JSON.stringify({ magic: DISCOVERY_MAGIC, t: 'pair.ok', name, port }), rinfo.port, rinfo.address)
+    } catch (error) {
+      warn?.(`发现应答发送失败：${error.message}`)
     }
-
-    if (normalize(msg.code) !== wanted) {
-      reply({ t: 'pair.reject' })
-      return
-    }
-    reply({ t: 'pair.ok', name, port })
     onPair?.(rinfo.address)
   })
 
@@ -105,13 +104,11 @@ export async function listenDiscovery({
  * @returns {Promise<{ host: string, port: number, name: string }>}
  */
 export async function findHost({
-  code,
   timeoutMs = 4000,
   udpPort = DISCOVERY_PORT,
   onProbe,
 }) {
   const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
-  const wanted = normalize(code)
 
   return await new Promise((resolve, reject) => {
     let settled = false
@@ -146,7 +143,7 @@ export async function findHost({
       } catch {
         /* 见上 */
       }
-      const payload = Buffer.from(JSON.stringify({ magic: DISCOVERY_MAGIC, t: 'pair', code: wanted }))
+      const payload = Buffer.from(JSON.stringify({ magic: DISCOVERY_MAGIC, t: 'pair' }))
       for (const address of broadcastAddresses()) {
         onProbe?.(address)
         try {
@@ -158,7 +155,7 @@ export async function findHost({
     })
 
     const timer = setTimeout(() => {
-      fail(Object.assign(new Error(`没有机器应答配对码 ${wanted}`), { code: 'node/no-host' }))
+      fail(Object.assign(new Error('这张网里没有机器应答（广播可能被防火墙吃了）'), { code: 'node/no-host' }))
     }, timeoutMs)
     timer.unref?.()
   })

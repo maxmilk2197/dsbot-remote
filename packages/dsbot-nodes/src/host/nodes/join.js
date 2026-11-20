@@ -84,11 +84,15 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
       // 先在局域网里喊一嗓子，谁认这个码谁应。
       let found
       try {
-        found = await findHost({ code: clean })
+        // 广播默认关：它会把"这里有台主机"告诉整张网，办公网里默认不该发。
+        if (process.env.DSBOT_NODES_LAN_DISCOVERY !== '1') {
+          throw Object.assign(new Error('没开局域网广播'), { code: 'node/no-host' })
+        }
+        found = await findHost()
       } catch (broadcastFailed) {
         // 广播只在同一张局域网里有效。找不到就是"对面不在这张网里"，
         // 不用让人回去翻参数 —— 直接进虚拟网，按主机的固定地址连。
-        warn('局域网里没找到主机，改走跨网…')
+        warn(process.env.DSBOT_NODES_LAN_DISCOVERY === '1' ? '局域网里没找到主机，改走跨网…' : '没开局域网广播，直接走跨网…')
         const core = await findEasyTier([], { onLog: line => warn(`  ${line}`) }).catch(() => undefined)
         if (core === undefined) throw broadcastFailed
         info = { ...info, host: `虚拟网 ${pairCredentials(clean).networkName}` }

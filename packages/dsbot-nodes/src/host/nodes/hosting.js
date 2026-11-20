@@ -103,18 +103,21 @@ export function createHosting({
     // 局域网广播是"方便"，不是"能不能用"：UDP 47821 被别的实例占着、或者防火墙
     // 不让 bind，都不该把已经听着的 TCP 一起废掉。起不来就只丢广播，跨网和手输
     // ip:port 照走。
+    // 广播默认关：问询包虽然不再带码，但它会把"这里有台主机"告诉整张网。
+    // 办公/园区这种不可信局域网要显式开（DSBOT_NODES_LAN_DISCOVERY=1）。
     let discovery
-    try {
-      discovery = await listenDiscovery({
-        code: chosen,
-        port: server.port,
-        name: hostName,
-        onPair: address => warn(`配对请求来自 ${address}`),
-        warn,
-      })
-    } catch (error) {
-      warn(`局域网广播没起来（${error?.message ?? error}）：同网段要手输 ip:端口`)
-      discovery = undefined
+    if (process.env.DSBOT_NODES_LAN_DISCOVERY === '1') {
+      try {
+        discovery = await listenDiscovery({
+          port: server.port,
+          name: hostName,
+          onPair: address => warn(`配对请求来自 ${address}`),
+          warn,
+        })
+      } catch (error) {
+        warn(`局域网广播没起来（${error?.message ?? error}）：同网段要手输 ip:端口`)
+        discovery = undefined
+      }
     }
 
     await store.setHost({ code: chosen, port: server.port })
