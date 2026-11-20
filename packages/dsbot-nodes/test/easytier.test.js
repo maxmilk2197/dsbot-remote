@@ -8,6 +8,7 @@ import {
   DEFAULT_SERVERS,
   hostVirtualIp,
   buildElevateScript,
+  instancePorts,
   pairCredentials,
   writeElevateScript,
 } from '../src/node/easytier.js'
@@ -142,4 +143,25 @@ test('局域网段取的是本机真实网卡，不是写死的值', async () =>
   for (const cidr of subnets) {
     assert.match(cidr, /^\d+\.\d+\.\d+\.0\/\d+$/, `${cidr} 必须是网络地址，主机位得是 0`)
   }
+})
+
+test('每个配对码有自己的实例名、监听口和 RPC 口，不和本机其它 EasyTier 抢', () => {
+  const a = instancePorts('F76TUA')
+  const b = instancePorts('TC7ECK')
+
+  assert.equal(a.instanceName, 'dsbot-F76TUA')
+  assert.ok(a.listener >= 26000 && a.listener < 34000, `监听口要在高位段：${a.listener}`)
+  assert.equal(a.rpc, a.listener + 1)
+  assert.notEqual(a.listener, b.listener, '不同配对码不应落到同一个监听口')
+
+  // 同一个码每次算出来必须一样，否则重启后 RPC 口变了、CLI 就连不上
+  assert.deepEqual(instancePorts('f76-tua'), a)
+})
+
+test('提权脚本也带实例隔离参数', () => {
+  const script = buildElevateScript(FLAGS)
+  assert.match(script, /-m/)
+  assert.match(script, /dsbot-TC7ECK/)
+  assert.match(script, /--rpc-portal/)
+  assert.match(script, /--config-dir/)
 })

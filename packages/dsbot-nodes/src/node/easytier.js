@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, networkInterfaces } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { ensureEasyTier, easyTierCacheDir, findEasyTierBinaries } from './easytier-fetch.js'
@@ -155,13 +156,13 @@ export function parseHostTag(hostname) {
  * 轮询 peer 列表，等主机的地址出现。虚拟网刚起来时列表是空的，所以要等。
  * @returns {Promise<string|undefined>} 主机的局域网地址，比如 192.168.3.248
  */
-export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1_500, onLog }) {
+export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1_500, onLog, rpcPortal }) {
   const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const output = await new Promise((resolve) => {
       let text = ''
-      const child = spawn(cli, ['peer'], { windowsHide: true, cwd: dirname(core) })
+      const child = spawn(cli, [...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []), 'peer'], { windowsHide: true, cwd: dirname(core) })
       child.stdout?.on('data', (chunk) => { text += chunk.toString('utf8') })
       child.stderr?.on('data', (chunk) => { text += chunk.toString('utf8') })
       child.on('error', () => resolve(''))
@@ -188,11 +189,11 @@ export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1
  * 之后才能加，而主机地址要进了虚拟网才看得到 —— 所以塞不进启动参数，
  * 只能用管理接口追加。
  */
-export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeoutMs = 15_000 }) {
+export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeoutMs = 15_000, rpcPortal }) {
   const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
   const run = () => new Promise((resolve) => {
     let err = ''
-    const child = spawn(cli, ['port-forward', 'add', protocol, bind, dst], {
+    const child = spawn(cli, [...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []), 'port-forward', 'add', protocol, bind, dst], {
       windowsHide: true, cwd: dirname(core),
     })
     child.stdout?.on('data', () => {})
@@ -264,6 +265,68 @@ export async function inspectEasyTierDir(dir = EASYTIER_DIR) {
 }
 
 /** 配对码 → EasyTier 的网名与密码。同一个码在两端派生出同一套。 */
+/**
+ * 和本机其它 EasyTier 错开。
+ *
+ * HMCL 的「陶瓦联机」也内置 EasyTier。默认实例名、默认监听口 11010、
+ * 默认 RPC 15888 都是全局的 —— 两边一起跑就会互相踩。
+ * 这里从配对码派生一组只属于我们的端口（26000-34000），并给实例起独立名字、
+ * 独立配置目录，两边就能同时存在。
+ */
+export function instancePorts(code) {
+  const normalized = String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
+  const digest = createHash('sha256').update(`dsbot-ports:${normalized}`).digest()
+  const base = 26000 + (digest.readUInt16BE(0) % 2000) * 4
+  return {
+    listener: base,
+    rpc: base + 1,
+    instanceName: `dsbot-${normalized}`,
+    configDir: join(EASYTIER_DIR, 'instances', normalized),
+  }
+}
+
+// 进程退出时尽量把子进程带走：DSH 被关掉后留一个 EasyTier 在后台，
+// 正是"关了 DSH 还是和陶瓦联机打架"的来源。
+const children = new Set()
+let exitHooked = false
+function trackChild(child) {
+  children.add(child)
+  child.once('exit', () => children.delete(child))
+  if (exitHooked) return
+  exitHooked = true
+  const killAll = () => { for (const each of children) { try { each.kill() } catch {} } }
+  process.once('exit', killAll)
+  process.once('SIGINT', killAll)
+  process.once('SIGTERM', killAll)
+}
+
+// 上一次没退干净的实例：pid 文件里记着，起来之前先收掉。
+function pidFile() {
+  return join(EASYTIER_DIR, 'current.pid')
+}
+function killPreviousInstance() {
+  try {
+    const raw = JSON.parse(readFileSync(pidFile(), 'utf8'))
+    const pid = Number(raw?.pid)
+    const at = Number(raw?.at ?? 0)
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return
+    if (Date.now() - at > 24 * 3600 * 1000) return
+    try { process.kill(pid) } catch {}
+  } catch {}
+}
+function rememberInstance(pid) {
+  try {
+    mkdirSync(EASYTIER_DIR, { recursive: true })
+    writeFileSync(pidFile(), JSON.stringify({ pid, at: Date.now() }))
+  } catch {}
+}
+function forgetInstance(pid) {
+  try {
+    const raw = JSON.parse(readFileSync(pidFile(), 'utf8'))
+    if (Number(raw?.pid) === pid) unlinkSync(pidFile())
+  } catch {}
+}
+
 export function pairCredentials(code) {
   const normalized = String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
   const secret = createHash('sha256').update(`dsbot-nodes:${normalized}`).digest('hex').slice(0, 24)
@@ -291,17 +354,28 @@ export function startEasyTier({
   subnetProxy,
 }) {
   const { networkName, networkSecret } = pairCredentials(code)
+  const ports = instancePorts(code)
   const args = [
     // -i 和 -d 是二选一：给了固定地址就别再要 DHCP，两边同时给会打架。
     ...(typeof ipv4 === 'string' && ipv4 !== '' ? ['-i', ipv4] : ['-d']),
     '--network-name', networkName,
     '--network-secret', networkSecret,
+    // 独立实例 / 独立配置 / 独立端口：和 HMCL 的陶瓦联机（也是 EasyTier）共存。
+    '-m', ports.instanceName,
+    '--config-dir', ports.configDir,
+    '-l', `tcp://0.0.0.0:${ports.listener}`,
+    '-l', `udp://0.0.0.0:${ports.listener}`,
+    '--rpc-portal', String(ports.rpc),
     ...(typeof hostname === 'string' && hostname !== '' ? ['--hostname', hostname] : []),
     ...(noTun ? ['--no-tun'] : []),
     ...(typeof subnetProxy === 'string' && subnetProxy !== '' ? ['-n', subnetProxy] : []),
     ...(servers.length ? servers.flatMap((server) => ['-p', server]) : []),
     ...extraArgs,
   ]
+
+  // 上一轮没退干净的先收掉，再起新的 —— 否则两个同名实例会抢 RPC 口。
+  killPreviousInstance()
+  try { mkdirSync(ports.configDir, { recursive: true }) } catch {}
 
   // cwd 必须跟着二进制走：EasyTier 要在自己旁边找 wintun.dll 建虚拟网卡。
   // 从别的目录拉起来它会报 Failed to create adapter —— 看着像没权限，其实是找不到 DLL。
@@ -310,6 +384,10 @@ export function startEasyTier({
     windowsHide: true,
     cwd: dirname(core),
   })
+
+  trackChild(child)
+  if (child.pid !== undefined) rememberInstance(child.pid)
+  child.once('exit', () => { if (child.pid !== undefined) forgetInstance(child.pid) })
 
   let output = ''
   const feed = (chunk) => {
@@ -420,10 +498,16 @@ export function startEasyTier({
  */
 export function buildElevateScript({ core, code, servers = DEFAULT_SERVERS }) {
   const { networkName, networkSecret } = pairCredentials(code)
+  const ports = instancePorts(code)
   const args = [
     '-i', hostVirtualIp(code),
     '--network-name', networkName,
     '--network-secret', networkSecret,
+    '-m', ports.instanceName,
+    '--config-dir', ports.configDir,
+    '-l', `tcp://0.0.0.0:${ports.listener}`,
+    '-l', `udp://0.0.0.0:${ports.listener}`,
+    '--rpc-portal', String(ports.rpc),
     ...servers.flatMap(server => ['-p', server]),
   ]
   // 单引号包一层最省事：这些值都是 hex / dsbot-XXXX / URL，不含单引号。

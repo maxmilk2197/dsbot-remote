@@ -8,7 +8,7 @@ import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { parseAgentCommand } from '../../node/agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'
 import net from 'node:net'
-import { addPortForward, findEasyTier, pairCredentials, startEasyTier, waitForHostPeer } from '../../node/easytier.js'
+import { addPortForward, findEasyTier, instancePorts, pairCredentials, startEasyTier, waitForHostPeer } from '../../node/easytier.js'
 import { createMirror } from './mirror.js'
 
 // 端口转发要在本机开一个真实端口，挑一个没人用的。
@@ -74,19 +74,21 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         const ready = await vnet.ready
         // 主机把"我在这张局域网的哪个地址、哪个端口"写在自己的 hostname 上，
         // 进了虚拟网就能从 peer 列表读到 —— 两端谁都不需要预先知道对方地址。
-        const target = await waitForHostPeer({ core: core.core, onLog: line => warn(`  ${line}`) })
+        const target = await waitForHostPeer({ core: core.core, rpcPortal: ports.rpc, onLog: line => warn(`  ${line}`) })
         if (target === undefined) {
           throw new Error('进了虚拟网，但没等到主机 —— 主机的跨网可能没开，或者配对码不一样')
         }
         const hostPort = target.port ?? 7777
         const localPort = await freePort()
         const forwarded = await addPortForward({
-          core: core.core, bind: `127.0.0.1:${localPort}`, dst: `${target.address}:${hostPort}`,
+          core: core.core, rpcPortal: ports.rpc,
+          bind: `127.0.0.1:${localPort}`, dst: `${target.address}:${hostPort}`,
         })
         if (forwarded.ok !== true) throw new Error(`端口转发没加上：${forwarded.error}`)
         found = { host: '127.0.0.1', port: localPort, name: `虚拟网 → ${target.address}:${hostPort}` }
         warn(`虚拟网就绪（${ready?.ipv4 ?? '?'}）→ 127.0.0.1:${localPort} 转 ${target.address}:${hostPort}`)
       }
+      const ports = instancePorts(clean)
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
