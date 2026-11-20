@@ -154,8 +154,13 @@ export function createHosting({
         code,
         ipv4: hostVirtualIp(code),
         noTun: true,
-        // 只代理第一张真实网卡：全代理会把虚拟网自己绕进去，而且多网卡时路由会打架。
-        subnetProxy: subnets[0],
+        // 只放行主机自己这一台（/32），不放行整个网段：以前代理 subnets[0]
+        // 等于把 192.168.x.0/24 上的打印机、NAS、路由后台一起借给了虚拟网里的
+        // 每个成员。远端只需要打到这台主机上，用 /32 就够。
+        // 确实要把整张内网借出去的人显式设 DSBOT_NODES_SHARE_LAN=1。
+        subnetProxy: process.env.DSBOT_NODES_SHARE_LAN === '1'
+          ? subnets[0]
+          : (typeof lan === 'string' && lan !== '' ? `${lan}/32` : undefined),
         // 地址和端口都编进名字：远端从 peer 列表读到就知道该往哪打。
         hostname: lan === undefined ? undefined : hostTag(lan, port),
       })
