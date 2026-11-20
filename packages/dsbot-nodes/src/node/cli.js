@@ -140,7 +140,7 @@ async function collectAttachments(text, root) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo, allowShell = false }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo, allowShell = false, cursors }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   // 能说话 = 显式配了 agent 命令，或者这台 DSH 自己有模型可用。
   const canTurn = agent !== undefined || (local !== undefined && llm !== undefined)
@@ -149,12 +149,20 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
   // 之后换了也只需要一条心跳，不用重连。
   let workspace = typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd()
   const wanted = Array.isArray(wantedGroups) ? wantedGroups.filter(each => typeof each === 'string' && each !== '') : []
+  // 续传点：每个群本地已经有到第几条。主机据此只补缺口，重连不会再把
+  // 已经有的历史重发一遍（本地也会按 seq 再挡一次）。
+  let resume = {}
+  try {
+    const read = typeof cursors === 'function' ? cursors() : cursors
+    if (read !== null && typeof read === 'object') resume = read
+  } catch { /* 进度读不出来就按没有算，最多多收几条重复 */ }
   peer.send({
     id: 'hello',
     method: 'node.hello',
     params: {
       name, deviceId, caps, workspace,
       ...(wanted.length === 0 ? {} : { wantedGroups: wanted }),
+      ...(Object.keys(resume).length === 0 ? {} : { cursors: resume }),
     },
   })
   const turns = new Map()
@@ -272,25 +280,28 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
       if (Array.isArray(result.groups)) {
         groups = result.groups
         if (groups.length > 0) say(`在群里：${groups.map(group => group.name).join('、')}`)
-        // 加入端要把这些群在本地也建出来（镜像群），不然群列表里看不到。
-        if (typeof onGroups === 'function') {
-          Promise.resolve(onGroups(groups)).catch(error => say(`建镜像群失败：${error.message}`))
-        }
       }
       if (Array.isArray(result.available)) {
         available = result.available
         if (available.length > 0) say(`主机那边有 ${available.length} 个群可以进：${available.map(group => group.name).join('、')}`)
       }
       if (frame.error !== undefined) say(`主机拒绝了握手：${frame.error.message ?? frame.error.code}`)
+      // 先报主机身份，再建镜像群：镜像群的身份是"哪台主机的哪个群"，
+      // 不知道 hostId 就先建，两台主机的同名群会被合成一个。
       if (typeof onHostInfo === 'function') {
         try {
           onHostInfo({
             hostName: String(result.hostName ?? ''),
+            hostId: String(result.hostId ?? ''),
             groups, available, nodeId: result.nodeId,
           })
         } catch (error) {
           say(`回调出错：${error.message}`)
         }
+      }
+      if (Array.isArray(result.groups) && typeof onGroups === 'function') {
+        // 加入端要把这些群在本地也建出来（镜像群），不然群列表里看不到。
+        Promise.resolve(onGroups(groups)).catch(error => say(`建镜像群失败：${error.message}`))
       }
       return
     }
@@ -319,8 +330,13 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
       const params = frame.params ?? {}
       const room = params.room ?? {}
       const lines = Array.isArray(params.lines) ? params.lines : []
+      // 快照也要打印：CLI 一进来就该看到上下文，而不是从下一句才开始。
+      if (lines.length > 0) process.stdout.write(`  ── 「${room.name ?? '群'}」最近的 ${lines.length} 条 ──\n`)
+      for (const line of lines) chat(line)
       if (typeof onGroupLine === 'function') {
-        try { onGroupLine({ roomId: room.id, roomName: room.name, snapshot: true }, lines) } catch (error) {
+        // 原样把主机的 params 递下去：hostId / cursor 都在里面，镜像群靠它们
+        // 区分主机、按水位去重。以前这里重新拼了一个只有 roomId 的对象。
+        try { onGroupLine({ ...params, roomId: room.id, roomName: room.name, snapshot: true }, lines) } catch (error) {
           say(`镜像失败：${error.message}`)
         }
       }
@@ -331,9 +347,6 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
     if (frame.method === 'group.line') {
       const params = frame.params ?? {}
       const lines = Array.isArray(params.lines) ? params.lines : []
-      if (params.snapshot === true) {
-        process.stdout.write(`  ── 「${params.roomName ?? '群'}」最近的 ${lines.length} 条 ──\n`)
-      }
       for (const line of lines) chat(line)
       // 镜像（手机上真的建一个同名群）走这个回调；CLI 自己用就不传。
       if (typeof onGroupLine === 'function') {

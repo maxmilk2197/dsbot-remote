@@ -33,7 +33,7 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
     hostName: '', workspace: '', groups: [], available: [], agent: false, agentLabel: '',
   }
   // 手机/另一台机器上的 ds-bot 里也出现这个群，消息双向（见 mirror.js）。
-  const mirror = createMirror({ rt, warn })
+  const mirror = createMirror({ rt, warn, home })
   // 跨网用的虚拟网：广播出不了局域网，靠它把两台机器放进同一张网里。
   let vnet = null
 
@@ -118,6 +118,9 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
       const url = `tcp://${found.host}:${found.port}`
       peer = await connectTcp({ url, token: clean })
       const deviceId = await deviceIdentity(name)
+      // 握手前先把进度文件读出来：node.hello 里要带续传点，晚一步读就只能
+      // 让主机从头补一遍（虽然 seq 去重能兜住，但白传一段历史）。
+      await mirror.load().catch(() => {})
       ctrl = servePeer(peer, {
         // 群里显示的名字：用户没填就用这台机器的名字。
         // 以前退到 found.host，局域网里就成了"127.0.0.1"—— 群里没人想 @ 一个 IP。
@@ -128,6 +131,8 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
         agent: commandAgent,
         local,
         llm,
+        // 握手时带上"每个群已经收到哪儿"，主机只补缺口。
+        cursors: () => mirror.cursors(),
         onGroupLine: (params, lines) => {
           void mirror.write(params, lines).catch(error => warn(`镜像群写入失败：${error.message}`))
         },
@@ -138,6 +143,8 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
         },
         // 主机回了它叫什么、有哪些群可以进 —— 设置页的弹窗就靠这个列表。
         onHostInfo: (hostInfo) => {
+          // 先记住是哪台主机：镜像群的身份和去重水位都按它分开记。
+          mirror.setHost(hostInfo?.hostId)
           info = {
             ...info,
             hostName: String(hostInfo?.hostName ?? ''),
