@@ -140,7 +140,7 @@ async function collectAttachments(text, root) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo, allowShell = false }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   // 能说话 = 显式配了 agent 命令，或者这台 DSH 自己有模型可用。
   const canTurn = agent !== undefined || (local !== undefined && llm !== undefined)
@@ -342,6 +342,20 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
       return
     }
 
+    // 审批：主机在下"在这台机器上跑命令"之前先问一句。读文件、列目录、看环境
+    // 这类只看不动的不问；run_shell 等价于拿本用户身份执行任意命令，默认拒绝，
+    // 只有启动时明确带了 --allow-shell 的人才放行 —— 开关在机器主人这一侧。
+    if (frame.method === 'node.approval') {
+      const action = frame.params?.action
+      const detail = frame.params?.detail ?? {}
+      const allow = action === 'run_shell' ? allowShell === true : true
+      say('主机要 ' + String(action ?? '?') + (detail.command ? '：' + detail.command : '') + ' → ' + (allow ? '允许' : '拒绝（没开 --allow-shell）'))
+      if (frame.id !== undefined) {
+        peer.send({ id: frame.id, type: 'rpc.response', result: allow ? { allow: true } : { allow: false, reason: '这台机器没开 --allow-shell' } })
+      }
+      return
+    }
+
     if (frame.method === 'node.exec') {
       const action = frame.params?.action
       // 白名单在这里再挡一次：execute 的 switch 有 default 分支，不挡的话
@@ -447,12 +461,13 @@ async function startListen(args) {
   const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd()
   const deviceId = await deviceIdentity(name)
   const agent = parseAgentCommand(args.agent) ?? (hasCommand('dsh') ? { command: 'dsh', args: ['-p'] } : undefined)
+  const allowShell = args['allow-shell'] === true || args['allow-shell'] === 'true'
 
   const server = await listenTcp({
     port: Number(args.port ?? 7777),
     host: typeof args.host === 'string' ? args.host : '0.0.0.0',
     token,
-    onConnection: peer => servePeer(peer, { name, deviceId, cwd, agent }),
+    onConnection: peer => servePeer(peer, { name, deviceId, cwd, agent, allowShell }),
   })
 
   let discovery

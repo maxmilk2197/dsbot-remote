@@ -1377,6 +1377,19 @@ function registerTool(rt, api, resolveNode) {
               command: args.text ?? args.shell ?? args.script,
             },
           }
+          // 执行命令前的审批：协议里 node.approval 一直是空的，模型说"跑一下"
+          // 就直接落到对方机器上。现在先问，对端默认拒绝（除非它自己开了
+          // --allow-shell）—— 机器主人决定要不要把 shell 借出去。
+          if (command === 'run_shell') {
+            const approval = await api.call(node.id, 'node.approval', {
+              approvalId: params.execId,
+              action: 'run_shell',
+              detail: { command: params.args.command ?? '' },
+            }, { timeoutMs: 10_000 }).catch(error => ({ allow: false, reason: error?.message ?? String(error) }))
+            if (approval?.allow !== true) {
+              return `${node.name} 没批准执行命令：${approval?.reason ?? approval?.message ?? '对端没开 --allow-shell'}`
+            }
+          }
           const result = await api.call(node.id, 'node.exec', params, { timeoutMs: 35_000 })
           const parts = [result.ok === false ? `失败：${result.message ?? result.code}` : '成功']
           if (result.output !== undefined) parts.push(String(result.output))
