@@ -631,18 +631,16 @@ window.__ModuleLoader__.load({
           ]),
           Input({
             value: joinAgent,
-            placeholder: '跑一轮用的命令，如 dsh -p（留空则这台只执行文件/命令，不参与对话）',
+            placeholder: '可选：跑一轮的命令（留空 = 直接用这台 DSH 已配好的模型，推荐）',
             onChange: event => setJoinAgent(event.target.value),
             style: { width: '100%' },
           }),
           join?.running
             ? stack([
               note(`已连上${join.hostName ? '：' + join.hostName : ''}${join.workspace ? '｜工作区 ' + join.workspace : ''}`),
-              // 没配 agent 就等于"只能看文件、不会说话"。不提前说清，
-              // 主机那边把它拉进群之后每一轮都会以"跑不了 turn"收场。
-              join.agent === false
-                ? note('这台没配 agent：主机能把文件/命令交给它，但它在群里不会说话。要让它发言，在上面填一个 agent 命令（例如 dsh -p）再点「连过去」，主机那边也要重新拉它进群。')
-                : null,
+              join.agentLabel
+                ? note(`说话用：${join.agentLabel}`)
+                : note('这台 DSH 没找到可用模型：主机能把文件/命令交给它，但它在群里不会说话。可以在上面填一个 agent 命令（例如 dsh -p）再重连。'),
               row([
                 Button({ children: '选群组和文件夹', onClick: () => setDialog(true) }),
                 note(join.error ? join.error : ''),

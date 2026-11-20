@@ -6,6 +6,7 @@
 import { findHost } from '@dsbot/node-protocol/discovery'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
 import { parseAgentCommand } from '../../node/agent.js'
+import { pickLocalModel } from '../../node/local-agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'
 import net from 'node:net'
 import { hostname } from 'node:os'
@@ -23,13 +24,13 @@ const freePort = () => new Promise((resolve, reject) => {
   })
 })
 
-export function createJoiner({ home, rt, warn = () => {} }) {
+export function createJoiner({ home, rt, llm, warn = () => {} }) {
   let peer = null
   // servePeer 返回的那套控制柄：说话、换工作区、申请进群。
   let ctrl = null
   let info = {
     running: false, code: null, host: null, since: null, error: null,
-    hostName: '', workspace: '', groups: [], available: [], agent: false,
+    hostName: '', workspace: '', groups: [], available: [], agent: false, agentLabel: '',
   }
   // 手机/另一台机器上的 ds-bot 里也出现这个群，消息双向（见 mirror.js）。
   const mirror = createMirror({ rt, warn })
@@ -61,11 +62,18 @@ export function createJoiner({ home, rt, warn = () => {} }) {
     // 主文件夹：这台机器自己选的根，主机浏览、run_shell、相对路径都从这儿算。
     const workspace = typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd()
     const wantedGroups = Array.isArray(wanted) ? wanted.filter(each => typeof each === 'string' && each !== '') : []
+    // 开箱即用：没填命令就用这台 DSH 自己配好的模型。
+    // 用户显式填了命令就以它为准（比如要连另一台机器上的 CLI）。
+    const commandAgent = typeof agent === 'string' && agent.trim() !== '' ? parseAgentCommand(agent) : undefined
+    const local = commandAgent === undefined ? await pickLocalModel(llm) : undefined
+    if (local !== undefined) warn(`本机模型：${local.name}（${local.provider}/${local.model}）`)
     info = {
       ...info, running: true, code: clean, error: null, host: null, since: Date.now(),
       hostName: '', workspace, groups: [], available: [],
-      // 这台配没配 agent：没配就只能读文件/跑命令，进了群也不会说话。
-      agent: typeof agent === 'string' && agent.trim() !== '',
+      agent: commandAgent !== undefined || local !== undefined,
+      agentLabel: commandAgent !== undefined
+        ? `${commandAgent.command}${commandAgent.args.length === 0 ? '' : ' ' + commandAgent.args.join(' ')}`
+        : (local?.name ?? ''),
     }
     // 加入端自己的端口和实例名。跨网分支里的 waitForHostPeer / addPortForward
     // 一开始就要用，必须在这里声明 —— 放到分支后面会 TDZ：
@@ -117,7 +125,9 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         deviceId,
         cwd: workspace,
         wantedGroups,
-        agent: typeof agent === 'string' && agent !== '' ? parseAgentCommand(agent) : undefined,
+        agent: commandAgent,
+        local,
+        llm,
         onGroupLine: (params, lines) => {
           void mirror.write(params, lines).catch(error => warn(`镜像群写入失败：${error.message}`))
         },

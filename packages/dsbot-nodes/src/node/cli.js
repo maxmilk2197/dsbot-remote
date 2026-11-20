@@ -16,6 +16,7 @@ import { findHost, listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { findEasyTier, hostVirtualIp, pairCredentials, startEasyTier } from './easytier.js'
 import { ALLOWED_ACTIONS, execute } from './exec.js'
 import { parseAgentCommand, runAgent } from './agent.js'
+import { runLocal } from './local-agent.js'
 
 const HOME = join(homedir(), '.dsbot-remote')
 const CAPS = ['exec', 'push_file']
@@ -121,9 +122,11 @@ async function collectAttachments(text) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox = 7788, wantedGroups = [], onGroupLine, onGroups, onHostInfo }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
-  const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
+  // 能说话 = 显式配了 agent 命令，或者这台 DSH 自己有模型可用。
+  const canTurn = agent !== undefined || (local !== undefined && llm !== undefined)
+  const caps = canTurn ? [...CAPS, 'agent'] : CAPS
   // 工作区：这台机器选定的主文件夹。握手就报给主机，主机据此浏览它的文件；
   // 之后换了也只需要一条心跳，不用重连。
   let workspace = typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd()
@@ -331,9 +334,9 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, want
 
     if (frame.method === 'turn.request') {
       const { turnId, prompt, cwd: asked, deadlineMs } = frame.params ?? {}
-      if (agent === undefined) {
+      if (!canTurn) {
         if (frame.id !== undefined) {
-          peer.send({ id: frame.id, error: { code: 'node/unsupported', message: '这台没配 --agent，跑不了 turn' } })
+          peer.send({ id: frame.id, error: { code: 'node/unsupported', message: '这台没配 agent，也找不到本机模型，跑不了 turn' } })
         }
         return
       }
@@ -343,15 +346,23 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, want
 
       const controller = new AbortController()
       turns.set(turnId, controller)
-      const result = await runAgent({
-        command: agent.command,
-        args: agent.args,
-        prompt,
-        cwd: typeof asked === 'string' && asked !== '' ? asked : cwd,
-        timeoutMs: Number(deadlineMs) > 0 ? Number(deadlineMs) : undefined,
-        signal: controller.signal,
-        onDelta: text => peer.send({ method: 'turn.event', params: { turnId, kind: 'delta', text } }),
-      })
+      const onDelta = text => peer.send({ method: 'turn.event', params: { turnId, kind: 'delta', text } })
+      // 优先用用户显式配的命令；没配就走这台 DSH 自己的模型（开箱即用那条路）。
+      const result = agent !== undefined
+        ? await runAgent({
+          command: agent.command,
+          args: agent.args,
+          prompt,
+          cwd: typeof asked === 'string' && asked !== '' ? asked : cwd,
+          timeoutMs: Number(deadlineMs) > 0 ? Number(deadlineMs) : undefined,
+          signal: controller.signal,
+          onDelta,
+        })
+        : await runLocal({
+          llm, provider: local.provider, model: local.model,
+          prompt, timeoutMs: Number(deadlineMs) > 0 ? Number(deadlineMs) : undefined,
+          signal: controller.signal, onDelta,
+        })
       turns.delete(turnId)
 
       say(`一轮结束 ${turnId}：${result.ok ? 'ok' : result.code} ${String(result.text ?? '').length} 字`)

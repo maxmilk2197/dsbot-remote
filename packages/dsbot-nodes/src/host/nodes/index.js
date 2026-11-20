@@ -649,7 +649,8 @@ ${links.join(' ')}`
   }
 
   // 反过来的那一半：这台机器也可以"加入别人的群"。
-  const joiner = createJoiner({ home: rt.home, rt, warn: message => warn(message) })
+  // 把这台 DSH 的模型总线交给加入端：没填 agent 命令时，它直接用本机模型说话。
+  const joiner = createJoiner({ home: rt.home, rt, llm: ctx?.llm, warn: message => warn(message) })
 
   // 真正的清理只由 guard 决定何时执行。context 卸载时不能自己直接停：
   // 热重载里旧 context 的卸载可能晚于新实例就位，一停就把新实例也带走了。
