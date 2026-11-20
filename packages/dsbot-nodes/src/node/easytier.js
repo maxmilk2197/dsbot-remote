@@ -156,13 +156,17 @@ export function parseHostTag(hostname) {
  * 轮询 peer 列表，等主机的地址出现。虚拟网刚起来时列表是空的，所以要等。
  * @returns {Promise<string|undefined>} 主机的局域网地址，比如 192.168.3.248
  */
-export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1_500, onLog, rpcPortal }) {
+export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1_500, onLog, rpcPortal, instanceName }) {
   const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const output = await new Promise((resolve) => {
       let text = ''
-      const child = spawn(cli, [...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []), 'peer'], { windowsHide: true, cwd: dirname(core) })
+      const child = spawn(cli, [
+        ...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []),
+        ...(instanceName ? ['-n', instanceName] : []),
+        'peer',
+      ], { windowsHide: true, cwd: dirname(core) })
       child.stdout?.on('data', (chunk) => { text += chunk.toString('utf8') })
       child.stderr?.on('data', (chunk) => { text += chunk.toString('utf8') })
       child.on('error', () => resolve(''))
@@ -189,11 +193,15 @@ export async function waitForHostPeer({ core, timeoutMs = 25_000, intervalMs = 1
  * 之后才能加，而主机地址要进了虚拟网才看得到 —— 所以塞不进启动参数，
  * 只能用管理接口追加。
  */
-export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeoutMs = 15_000, rpcPortal }) {
+export async function addPortForward({ core, protocol = 'tcp', bind, dst, timeoutMs = 15_000, rpcPortal, instanceName }) {
   const cli = join(dirname(core), isWindows ? 'easytier-cli.exe' : 'easytier-cli')
   const run = () => new Promise((resolve) => {
     let err = ''
-    const child = spawn(cli, [...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []), 'port-forward', 'add', protocol, bind, dst], {
+    const child = spawn(cli, [
+      ...(rpcPortal ? ['-p', `127.0.0.1:${rpcPortal}`] : []),
+      ...(instanceName ? ['-n', instanceName] : []),
+      'port-forward', 'add', protocol, bind, dst,
+    ], {
       windowsHide: true, cwd: dirname(core),
     })
     child.stdout?.on('data', () => {})
@@ -273,16 +281,55 @@ export async function inspectEasyTierDir(dir = EASYTIER_DIR) {
  * 这里从配对码派生一组只属于我们的端口（26000-34000），并给实例起独立名字、
  * 独立配置目录，两边就能同时存在。
  */
-export function instancePorts(code) {
+export function instancePorts(code, role = 'host') {
   const normalized = String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
-  const digest = createHash('sha256').update(`dsbot-ports:${normalized}`).digest()
+  // 主机和加入端各算各的端口：同一台机器既当主机又去连别人时也不会撞。
+  const digest = createHash('sha256').update(`dsbot-ports:${role}:${normalized}`).digest()
   const base = 26000 + (digest.readUInt16BE(0) % 2000) * 4
   return {
     listener: base,
     rpc: base + 1,
-    instanceName: `dsbot-${normalized}`,
-    configDir: join(EASYTIER_DIR, 'instances', normalized),
+    instanceName: role === 'join' ? `dsbot-join-${normalized}` : `dsbot-${normalized}`,
+    configDir: join(EASYTIER_DIR, 'instances', `${role}-${normalized}`),
   }
+}
+
+/**
+ * 拼 EasyTier 启动参数（纯函数，单测直接验）。
+ *
+ * role=host：监听一个自己的高位端口，方便 P2P 直连；
+ * role=join：--no-listener，只连出去。加入端再监听 11010 会和本机主机实例
+ *           抢端口（os error 10048），EasyTier 会直接退出(1)。
+ */
+export function buildEasyTierArgs({
+  code,
+  servers = DEFAULT_SERVERS,
+  ipv4,
+  hostname,
+  noTun = false,
+  subnetProxy,
+  role = 'host',
+}) {
+  const { networkName, networkSecret } = pairCredentials(code)
+  const ports = instancePorts(code, role)
+  const args = [
+    // -i 和 -d 是二选一：给了固定地址就别再要 DHCP，两边同时给会打架。
+    ...(typeof ipv4 === 'string' && ipv4 !== '' ? ['-i', ipv4] : ['-d']),
+    '--network-name', networkName,
+    '--network-secret', networkSecret,
+    // 独立实例 / 独立配置：和 HMCL 的陶瓦联机（也是 EasyTier）共存。
+    '-m', ports.instanceName,
+    '--config-dir', ports.configDir,
+    ...(role === 'join'
+      ? ['--no-listener']
+      : ['-l', `tcp://0.0.0.0:${ports.listener}`, '-l', `udp://0.0.0.0:${ports.listener}`]),
+    '--rpc-portal', String(ports.rpc),
+    ...(typeof hostname === 'string' && hostname !== '' ? ['--hostname', hostname] : []),
+    ...(noTun ? ['--no-tun'] : []),
+    ...(typeof subnetProxy === 'string' && subnetProxy !== '' ? ['-n', subnetProxy] : []),
+    ...(servers.length ? servers.flatMap((server) => ['-p', server]) : []),
+  ]
+  return { ports, args }
 }
 
 // 进程退出时尽量把子进程带走：DSH 被关掉后留一个 EasyTier 在后台，
@@ -352,26 +399,12 @@ export function startEasyTier({
   noTun = false,
   // 把自己所在的局域网"借"给虚拟网（子网代理）。主机用这个让远端访问到它。
   subnetProxy,
+  // host：监听自己的端口；join：--no-listener，只连出去。
+  role = 'host',
 }) {
-  const { networkName, networkSecret } = pairCredentials(code)
-  const ports = instancePorts(code)
-  const args = [
-    // -i 和 -d 是二选一：给了固定地址就别再要 DHCP，两边同时给会打架。
-    ...(typeof ipv4 === 'string' && ipv4 !== '' ? ['-i', ipv4] : ['-d']),
-    '--network-name', networkName,
-    '--network-secret', networkSecret,
-    // 独立实例 / 独立配置 / 独立端口：和 HMCL 的陶瓦联机（也是 EasyTier）共存。
-    '-m', ports.instanceName,
-    '--config-dir', ports.configDir,
-    '-l', `tcp://0.0.0.0:${ports.listener}`,
-    '-l', `udp://0.0.0.0:${ports.listener}`,
-    '--rpc-portal', String(ports.rpc),
-    ...(typeof hostname === 'string' && hostname !== '' ? ['--hostname', hostname] : []),
-    ...(noTun ? ['--no-tun'] : []),
-    ...(typeof subnetProxy === 'string' && subnetProxy !== '' ? ['-n', subnetProxy] : []),
-    ...(servers.length ? servers.flatMap((server) => ['-p', server]) : []),
-    ...extraArgs,
-  ]
+  const built = buildEasyTierArgs({ code, servers, ipv4, hostname, noTun, subnetProxy, role })
+  const ports = built.ports
+  const args = [...built.args, ...extraArgs]
 
   // 上一轮没退干净的先收掉，再起新的 —— 否则两个同名实例会抢 RPC 口。
   killPreviousInstance()

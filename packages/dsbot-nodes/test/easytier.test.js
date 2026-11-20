@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   DEFAULT_SERVERS,
   hostVirtualIp,
+  buildEasyTierArgs,
   buildElevateScript,
   instancePorts,
   pairCredentials,
@@ -164,4 +165,29 @@ test('提权脚本也带实例隔离参数', () => {
   assert.match(script, /dsbot-TC7ECK/)
   assert.match(script, /--rpc-portal/)
   assert.match(script, /--config-dir/)
+})
+
+test('加入端 --no-listener：不和本机主机实例抢 11010', () => {
+  const { ports, args } = buildEasyTierArgs({
+    code: 'HRN38X', role: 'join', noTun: true, servers: ['tcp://relay.example:11010'],
+  })
+
+  assert.ok(args.includes('--no-listener'), '加入端不能监听')
+  assert.ok(!args.includes('-l'), '加入端不该带任何 -l')
+  assert.equal(ports.instanceName, 'dsbot-join-HRN38X')
+  assert.deepEqual(args.slice(args.indexOf('-m'), args.indexOf('-m') + 2), ['-m', 'dsbot-join-HRN38X'])
+  assert.deepEqual(args.slice(args.indexOf('--rpc-portal'), args.indexOf('--rpc-portal') + 2),
+    ['--rpc-portal', String(ports.rpc)])
+})
+
+test('主机角色仍然监听自己的高位端口，不和 11010 冲突', () => {
+  const { ports, args } = buildEasyTierArgs({
+    code: 'HRN38X', role: 'host', noTun: true, subnetProxy: '192.168.3.0/24',
+  })
+
+  assert.ok(!args.includes('--no-listener'))
+  assert.ok(args.includes(`tcp://0.0.0.0:${ports.listener}`))
+  assert.equal(ports.instanceName, 'dsbot-HRN38X')
+  // 主机和加入端各算一套端口，同一台机器两边都开也不会撞
+  assert.notEqual(ports.rpc, instancePorts('HRN38X', 'join').rpc)
 })
