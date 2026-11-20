@@ -74,7 +74,12 @@ export function createHosting({
           break
         } catch (error) {
           lastError = error
-          if (error?.code !== 'EADDRINUSE' || attempt === 3) break
+          // EACCES 在 Windows 上不是"没权限"，而是这个端口落在 Hyper-V/WSL 预留的
+          // 排除区间里（netsh int ipv4 show excludedportrange 能看到）。它和
+          // EADDRINUSE 一样只说明"这个档位不能用"，换下一个就行，不能让整个远程
+          // 功能起不来。
+          const retryable = error?.code === 'EADDRINUSE' || error?.code === 'EACCES'
+          if (!retryable || attempt === 3) break
           await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)))
         }
       }
@@ -84,7 +89,7 @@ export function createHosting({
         }
         break
       }
-      if (lastError?.code !== 'EADDRINUSE') break
+      if (lastError?.code !== 'EADDRINUSE' && lastError?.code !== 'EACCES') break
     }
     if (server === undefined) {
       if (lastError?.code === 'EADDRINUSE') {
@@ -95,13 +100,22 @@ export function createHosting({
       throw lastError
     }
 
-    const discovery = await listenDiscovery({
-      code: chosen,
-      port: server.port,
-      name: hostName,
-      onPair: address => warn(`配对请求来自 ${address}`),
-      warn,
-    })
+    // 局域网广播是"方便"，不是"能不能用"：UDP 47821 被别的实例占着、或者防火墙
+    // 不让 bind，都不该把已经听着的 TCP 一起废掉。起不来就只丢广播，跨网和手输
+    // ip:port 照走。
+    let discovery
+    try {
+      discovery = await listenDiscovery({
+        code: chosen,
+        port: server.port,
+        name: hostName,
+        onPair: address => warn(`配对请求来自 ${address}`),
+        warn,
+      })
+    } catch (error) {
+      warn(`局域网广播没起来（${error?.message ?? error}）：同网段要手输 ip:端口`)
+      discovery = undefined
+    }
 
     await store.setHost({ code: chosen, port: server.port })
     // 监听不该独自撑住进程：宿主常驻，但测试与 CLI 用完就能退。
