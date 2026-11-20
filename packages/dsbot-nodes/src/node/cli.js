@@ -462,6 +462,8 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
     say(`断开 ${peer.remote}`)
   })
   peer.on('bad-frame', error => say(`坏帧：${error.message}`))
+  // 处理某帧时抛错不该悄悄吞掉：静默的 except 会让"为什么没反应"永远查不出来。
+  peer.on('listener-error', error => say(`这一帧处理出错：${error?.message ?? error}`))
   return controller
 }
 
@@ -484,16 +486,19 @@ async function startListen(args) {
     onConnection: peer => servePeer(peer, { name, deviceId, cwd, agent, allowShell }),
   })
 
+  const lan = args.lan === true || args.lan === 'true' || process.env.DSBOT_NODES_LAN_DISCOVERY === '1'
   let discovery
-  if (code !== undefined) {
+  if (code !== undefined && lan) {
     discovery = await listenDiscovery({
-      code,
       port: server.port,
       name,
       onPair: ip => say(`配对请求来自 ${ip}`),
       warn: say,
     })
-    say(`配对码 ${code} —— 另一台机器运行：dsbot-remote pair --code ${code}`)
+    say(`配对码 ${code} —— 另一台机器运行：dsbot-remote pair --code ${code} --lan`)
+  } else if (code !== undefined) {
+    say(`配对码 ${code} —— 另一台机器运行：dsbot-remote pair --code ${code} --to <这台的内网 IP>:${server.port}`)
+    say('（没开局域网广播：广播会把「这里有台主机」告诉整张网，--lan 才打开）')
   }
 
   say(`监听 ${args.host ?? '0.0.0.0'}:${server.port}`)
@@ -559,49 +564,82 @@ async function runPair(args) {
       host = { host: rawHost, port: Number(rawPort) > 0 ? Number(rawPort) : 7777, name: rawHost }
       say(`直接连 ${host.host}:${host.port}（跳过广播）`)
     } else {
-      say(`找配对码 ${code} 的主机…`)
-      try {
-        host = await findHost({ code, onProbe: address => say(`  询问 ${address}`) })
-      } catch {
+      const lan = args.lan === true || args.lan === 'true' || process.env.DSBOT_NODES_LAN_DISCOVERY === '1'
+      if (lan) {
+        say(`找配对码 ${code} 的主机…`)
+        try {
+          host = await findHost({ onProbe: address => say(`  询问 ${address}`) })
+        } catch {
+          // 广播进不去就算了，下面统一退到跨网。
+        }
+      }
+      if (host === undefined) {
         // UDP 广播出不了局域网：找不到就说明对面不在这张网里（或者广播被防火墙吃了）。
         // 与其让人回去翻文档加参数，不如直接进虚拟网按主机的固定地址连。
-        say('局域网里没找到，改走跨网…')
+        say(lan ? '局域网里没找到，改走跨网…' : '没开局域网广播，直接走跨网…')
         await enterNetwork()
         const target = hostVirtualIp(code).split('/')[0]
         host = { host: target, port: 7777, name: '虚拟网主机' }
         say(`走虚拟网找 ${target}:7777`)
       }
     }
-    say(`找到 ${host.name || '主机'} ${host.host}:${host.port}`)
+    const target = { host: host.host, port: host.port, name: host.name }
+    say(`找到 ${target.name || '主机'} ${target.host}:${target.port}`)
 
-    // 主机那边 7777 被占时会自动往 17777/27777 挪（广播会带上真实端口，
-    // 所以只有跨网这条硬编码路径需要挨个试）。
-    let peer
-    let lastConnectError
-    const ports = [...new Set([host.port, 17777, 27777].filter(port => Number(port) > 0))]
-    for (const port of ports) {
-      try {
-        peer = await connectTcp({ url: `tcp://${host.host}:${port}`, token: code })
-        if (port !== host.port) say(`主机在 ${port} 上（${host.port} 没响应）`)
-        break
-      } catch (error) {
-        lastConnectError = error
-      }
-    }
-    if (peer === undefined) throw lastConnectError ?? new Error('连不上主机')
-    say('已连上')
-    // 断线不要让人去猜：同一条命令再跑一次就是重连，配对码不变。
-    peer.on('close', () => say('连接断了。同一条命令再跑一次就重连（配对码不变）。'))
-    servePeer(peer, { name, deviceId, cwd, agent })
-
+    let stopped = false
+    let current
     const stop = () => {
+      stopped = true
       say('收工')
-      try { peer.close() } catch {}
+      try { current?.close() } catch {}
       network?.stop()
       process.exit(0)
     }
     process.on('SIGINT', stop)
     process.on('SIGTERM', stop)
+
+    // 主机那边 7777 被占时会自动往 17777/27777 挪（广播会带上真实端口，
+    // 所以只有跨网这条硬编码路径需要挨个试）。
+    const connectOnce = async () => {
+      let lastConnectError
+      const ports = [...new Set([target.port, 17777, 27777].filter(port => Number(port) > 0))]
+      for (const port of ports) {
+        try {
+          const peer = await connectTcp({ url: `tcp://${target.host}:${port}`, token: code })
+          if (port !== target.port) say(`主机在 ${port} 上（${target.port} 没响应）`)
+          return peer
+        } catch (error) {
+          lastConnectError = error
+        }
+      }
+      throw lastConnectError ?? new Error('连不上主机')
+    }
+
+    // 断了自己接回来：办公室的 NAT 老化、Wi-Fi 漫游、主机重启都会断，
+    // 不该让人守着终端重敲命令。退避 1s → 2s → … 最多 30s。
+    let backoff = 1_000
+    while (!stopped) {
+      try {
+        current = await connectOnce()
+      } catch (error) {
+        if (stopped) break
+        say(`连不上：${error.message}（${Math.round(backoff / 1000)} 秒后重试）`)
+        await new Promise(resolve => setTimeout(resolve, backoff))
+        backoff = Math.min(backoff * 2, 30_000)
+        continue
+      }
+      backoff = 1_000
+      const peer = current
+      say('已连上')
+      peer.on('close', () => {
+        if (!stopped) say('连接断了，正在重连…')
+      })
+      servePeer(peer, { name, deviceId, cwd, agent })
+      await new Promise(resolve => {
+        if (peer.closed === true) return resolve(undefined)
+        peer.once('close', () => resolve(undefined))
+      })
+    }
   } catch (error) {
     network?.stop()
     fail(error.message)
