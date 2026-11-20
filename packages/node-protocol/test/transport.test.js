@@ -3,8 +3,9 @@
 // 这些是"跨地区跑一整轮"之前必须确定的事 —— 帧边界错了，上面所有协议都白搭。
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import net from 'node:net'
 import { once } from 'node:events'
-import { BadFrame, FrameReader, connectTcp, encodeFrame, listenTcp, parseTcpUrl } from '../src/transport/tcp.js'
+import { BadFrame, FrameReader, Peer, connectTcp, encodeFrame, listenTcp, parseTcpUrl } from '../src/transport/tcp.js'
 
 test('一帧编码后能读回来，中文不丢', () => {
   const frame = { t: 'msg', text: '写代码那台已上线', n: 42 }
@@ -146,6 +147,56 @@ test('空闲连接靠心跳活着，不会被自己掐死', async () => {
     assert.equal(client.closed, false)
   } finally {
     client.close()
+    server.close()
+  }
+})
+
+test('装上密钥之后，线路上抓不到明文（AES-256-GCM）', async () => {
+  const key = Buffer.alloc(32, 7)
+  const got = []
+  const server = net.createServer(socket => {
+    const peer = new Peer(socket)
+    peer.setCipher(key)
+    peer.on('frame', frame => got.push(frame))
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  const socket = net.connect(server.address().port, '127.0.0.1')
+  const chunks = []
+  socket.on('data', buf => chunks.push(buf))
+  await once(socket, 'connect')
+  const peer = new Peer(socket)
+  peer.setCipher(key)
+  try {
+    peer.send({ method: 'group.line', text: 'sesame-plaintext' })
+    await new Promise(done => setTimeout(done, 150))
+    const raw = Buffer.concat(chunks).toString('utf8')
+    assert.equal(raw.includes('sesame-plaintext'), false, '线上不该出现消息正文')
+    assert.equal(raw.includes('group.line'), false, '方法名也不该是明文')
+    assert.equal(got.length, 1)
+    assert.equal(got[0].text, 'sesame-plaintext')
+  } finally {
+    peer.close()
+    socket.destroy()
+    server.close()
+  }
+})
+
+test('单帧超限：send 回 false 而不抛（抛出去就是宿主的 fatal）', async () => {
+  const server = net.createServer(() => {})
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  const socket = net.connect(server.address().port, '127.0.0.1')
+  await once(socket, 'connect')
+  const peer = new Peer(socket)
+  const errors = []
+  peer.on('listener-error', error => errors.push(error.message))
+  try {
+    const sent = peer.send({ text: 'x'.repeat(9 * 1024 * 1024) })
+    assert.equal(sent, false)
+    assert.equal(errors.length, 1)
+    assert.match(errors[0], /too large/)
+  } finally {
+    peer.close()
+    socket.destroy()
     server.close()
   }
 })
