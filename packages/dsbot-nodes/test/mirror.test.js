@@ -130,3 +130,31 @@ test('不是镜像群的发言不往外发（别把本地别的群搅进来）',
 
   assert.deepEqual(peer.sent, [])
 })
+
+test('连上主机时按群列表批量建镜像群，不用等第一条消息', async () => {
+  const { rt, calls } = fakeRt()
+  const mirror = createMirror({ rt })
+
+  const made = await mirror.ensureAll([
+    { id: 'host-1', name: '测试' },
+    { id: 'host-2', name: '写代码' },
+  ])
+
+  assert.equal(made, 2)
+  assert.equal(calls.created.length, 2)
+  assert.deepEqual(calls.created.map(each => each.name), [mirrorName('测试'), mirrorName('写代码')])
+  assert.deepEqual(calls.logged, [], '建群本身不写消息')
+})
+
+test('hello 回执和 snapshot 同时到：同一个群只建一次', async () => {
+  const { rt, calls } = fakeRt()
+  const mirror = createMirror({ rt })
+
+  const [a, b] = await Promise.all([
+    mirror.ensure({ roomId: 'host-1', roomName: '测试' }),
+    mirror.ensure({ roomId: 'host-1', roomName: '测试' }),
+  ])
+
+  assert.equal(calls.created.length, 1, '并发 ensure 不能建出两个群')
+  assert.equal(a.id, b.id)
+})

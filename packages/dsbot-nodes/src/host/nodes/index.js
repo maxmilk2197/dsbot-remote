@@ -311,8 +311,11 @@ function installOnce(rt) {
       if (room === undefined) continue
       const all = await rt.groupLinesAfter(groupId, 0).catch(() => [])
       const tail = (all ?? []).slice(-LINE_TAIL).map(lineOf).filter(line => line.text !== '')
-      if (tail.length === 0) continue
-      peer.send({ method: 'group.line', params: { roomId: room.id, roomName: room.name, lines: tail, snapshot: true } })
+      // 空的群也要发：加入端靠这条消息把群在本地建出来，不然群列表里看不到。
+      peer.send({
+        method: 'group.snapshot',
+        params: { room: { id: room.id, name: room.name || room.id }, lines: tail, cursor: 0 },
+      })
     }
   }
 

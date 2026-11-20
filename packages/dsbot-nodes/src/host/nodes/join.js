@@ -98,6 +98,8 @@ export function createJoiner({ home, rt, warn = () => {} }) {
         onGroupLine: (params, lines) => {
           void mirror.write(params, lines).catch(error => warn(`镜像群写入失败：${error.message}`))
         },
+        // 连上就把对方给的那些群在本地建出来，不用等第一条消息。
+        onGroups: groups => mirror.ensureAll(groups),
       })
       info = { ...info, running: true, host: url }
       mirror.bind(peer)

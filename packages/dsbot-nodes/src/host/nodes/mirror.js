@@ -26,6 +26,8 @@ export function createMirror({ rt, warn = () => {} }) {
    * 找到（或建好）这个主机群在本地对应的群。
    * 一个群只建一次；重连之后内存里的映射没了，就按名字找回来。
    */
+  const pending = new Map()   // 主机群 id -> 正在建的 Promise
+
   async function ensure(params) {
     if (rt === undefined) return undefined
     const hostRoomId = String(params?.roomId ?? '')
@@ -33,32 +35,39 @@ export function createMirror({ rt, warn = () => {} }) {
 
     const known = localRoom(mirrors.get(hostRoomId))
     if (known !== undefined) return known
+    // hello 回执和 group.snapshot 可能同时触发同一个群，不能建出两个。
+    const inflight = pending.get(hostRoomId)
+    if (inflight !== undefined) return inflight
 
-    if (typeof rt.createRoom !== 'function') return undefined
-    const wanted = mirrorName(params?.roomName)
-    const existing = rooms().find(room => room.name === wanted)
-    if (existing !== undefined) {
-      mirrors.set(hostRoomId, existing.id)
-      return existing
-    }
+    const job = (async () => {
+      if (typeof rt.createRoom !== 'function') return undefined
+      const wanted = mirrorName(params?.roomName)
+      const existing = rooms().find(room => room.name === wanted)
+      if (existing !== undefined) {
+        mirrors.set(hostRoomId, existing.id)
+        return existing
+      }
 
-    // ds-bot 的群规定至少两个 Bot 成员。少一个就只能报一句，不能硬造 ——
-    // 造出来的群在界面上是坏的，比没有更糟。
-    const members = Object.keys(rt.state?.bots ?? {}).slice(0, 2)
-    if (members.length < 2) {
-      warn('镜像群建不了：本地至少要有两个 Bot（ds-bot 的群两个成员起）')
-      return undefined
-    }
-    const room = await rt.createRoom({
-      members,
-      name: wanted,
-      // 关键：没有 admin，ds-bot 就不会把普通消息派给任何成员。
-      // 有 admin 的话，你在镜像群说一句话，本地 Bot 就会跑一轮，和主机重复回应。
-      admin: null,
-    })
-    mirrors.set(hostRoomId, room.id)
-    warn(`建好镜像群「${room.name}」`)
-    return room
+      // ds-bot 的群规定至少两个 Bot 成员。少一个就只能报一句，不能硬造 ——
+      // 造出来的群在界面上是坏的，比没有更糟。
+      const members = Object.keys(rt.state?.bots ?? {}).slice(0, 2)
+      if (members.length < 2) {
+        warn('镜像群建不了：本地至少要有两个 Bot（ds-bot 的群两个成员起）')
+        return undefined
+      }
+      const room = await rt.createRoom({
+        members,
+        name: wanted,
+        // 关键：没有 admin，ds-bot 就不会把普通消息派给任何成员。
+        // 有 admin 的话，你在镜像群说一句话，本地 Bot 就会跑一轮，和主机重复回应。
+        admin: null,
+      })
+      mirrors.set(hostRoomId, room.id)
+      warn(`建好镜像群「${room.name}」`)
+      return room
+    })()
+    pending.set(hostRoomId, job)
+    try { return await job } finally { pending.delete(hostRoomId) }
   }
 
   /** 把主机推来的消息写进镜像群。只写日志，不触发任何轮次。 */
@@ -114,5 +123,21 @@ export function createMirror({ rt, warn = () => {} }) {
     peer = null
   }
 
-  return { ensure, write, bind, stop, onLocalLine, mirrors }
+  /**
+   * 连上主机时先把它给的群都建出来，不用等第一条消息。
+   * hello 回执里只有这台机器真正进了的群，不会把无关的群灌进来。
+   */
+  async function ensureAll(groups) {
+    let made = 0
+    for (const group of groups ?? []) {
+      if (group === null || group === undefined) continue
+      const id = String(group.id ?? group.roomId ?? '')
+      if (id === '') continue
+      const room = await ensure({ roomId: id, roomName: group.name ?? group.roomName })
+      if (room !== undefined) made += 1
+    }
+    return made
+  }
+
+  return { ensure, ensureAll, write, bind, stop, onLocalLine, mirrors }
 }

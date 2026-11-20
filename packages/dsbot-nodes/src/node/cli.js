@@ -121,7 +121,7 @@ async function collectAttachments(text) {
   return found
 }
 
-export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGroupLine }) {
+export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGroupLine, onGroups }) {
   say(`主机已连上 ${peer.remote ?? '主机'}`)
   const caps = agent === undefined ? CAPS : [...CAPS, 'agent']
   peer.send({ id: 'hello', method: 'node.hello', params: { name, deviceId, caps } })
@@ -174,6 +174,10 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGr
       if (Array.isArray(frame.result?.groups)) {
         groups = frame.result.groups
         if (groups.length > 0) say(`在群里：${groups.map(group => group.name).join('、')}`)
+        // 加入端要把这些群在本地也建出来（镜像群），不然群列表里看不到。
+        if (typeof onGroups === 'function') {
+          Promise.resolve(onGroups(groups)).catch(error => say(`建镜像群失败：${error.message}`))
+        }
       }
       return
     }
@@ -187,6 +191,20 @@ export function servePeer(peer, { name, deviceId, cwd, agent, inbox = 7788, onGr
     if (typeof frame?.method !== 'string') return
 
     // 群聊镜像：主机把群里的消息推过来，这里像正常群聊那样滚动打印。
+    // 主机后来把这台机器拉进新群：只发一个空的 snapshot，让本地先把群建出来。
+    if (frame.method === 'group.snapshot') {
+      const params = frame.params ?? {}
+      const room = params.room ?? {}
+      const lines = Array.isArray(params.lines) ? params.lines : []
+      if (typeof onGroupLine === 'function') {
+        try { onGroupLine({ roomId: room.id, roomName: room.name, snapshot: true }, lines) } catch (error) {
+          say(`镜像失败：${error.message}`)
+        }
+      }
+      if (frame.id !== undefined) peer.send({ id: frame.id, result: { ok: true } })
+      return
+    }
+
     if (frame.method === 'group.line') {
       const params = frame.params ?? {}
       const lines = Array.isArray(params.lines) ? params.lines : []
