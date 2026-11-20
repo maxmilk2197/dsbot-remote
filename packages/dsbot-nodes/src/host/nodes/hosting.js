@@ -1,8 +1,8 @@
 // 本文件由 AI 生成，请勿用于生产环境。
 // 主机侧"等远程连过来"的那一半：开端口 + 应答局域网配对问询。
 //
-// 配对码是这把门钥匙的全部：远程只输 6 位码，既拿到地址（UDP 广播应答）又拿到
-// 通关口令（码本身当 token）。换码 = rotate()，旧码立刻失效。
+// 配对码是这把门钥匙的全部：远程只输码，既拿到地址（UDP 广播应答），也用它
+// 当握手的 KDF 盐（v2 起码不再明文上网）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '@dsbot/node-protocol/discovery'
 import { listenTcp } from '@dsbot/node-protocol/tcp'
 import { elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'

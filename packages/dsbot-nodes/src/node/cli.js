@@ -36,7 +36,7 @@ const CAPS = ['exec', 'push_file']
 const USAGE = `dsbot-remote <命令>
 
 listen    等主机来连（主线；会给出一个配对码）
-  --code <码>        6 位配对码，兼作口令；另一台机器用 pair --code 连过来
+  --code <码>        8 位配对码（旧 6 位仍认）；另一台机器用 pair --code 连过来
   --port <端口>      默认 7777
   --host <地址>      默认 0.0.0.0
   --token <口令>     不用配对码时的手动口令（至少 6 位）
@@ -46,7 +46,7 @@ listen    等主机来连（主线；会给出一个配对码）
                      默认：本机装了 dsh 就用 "dsh -p"，装 claude 就写 --agent "claude -p"
 
 pair      输入配对码接上主机（日常只需要这条）
-  --code <码>        6 位配对码，必需
+  --code <码>        8 位配对码（旧 6 位仍认），必需
   --to <ip:端口>     跳过广播，直连这台主机（不同网段、手机热点、广播被墙时用）
   --network          先加入 EasyTier 虚拟网（跨网络时用；同局域网可省）
   --name / --cwd / --agent   同上
@@ -455,7 +455,8 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
 async function startListen(args) {
   const code = typeof args.code === 'string' ? args.code.replace(/[\s-]/g, '').toUpperCase() : undefined
   const token = code ?? (typeof args.token === 'string' ? args.token : process.env.DSBOT_NODE_TOKEN)
-  if (token === undefined || token.length < 6) fail('listen 需要 --code（6 位配对码）或 --token（至少 6 位）')
+  if (code !== undefined && code.length < 6) fail('listen 需要 --code（配对码 6–8 位）')
+  if (token === undefined || token.length < 6) fail('listen 需要 --code（配对码）或 --token（至少 6 位）')
 
   const name = typeof args.name === 'string' ? args.name : hostname()
   const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd()
@@ -503,7 +504,7 @@ async function startListen(args) {
 async function runPair(args) {
   const raw = typeof args.code === 'string' ? args.code : ''
   const code = raw.replace(/[\s-]/g, '').toUpperCase()
-  if (code.length < 6) fail('pair 需要 --code（6 位配对码）')
+  if (code.length < 6) fail('pair 需要 --code（配对码 6–8 位）')
 
   const name = typeof args.name === 'string' ? args.name : hostname()
   const cwd = typeof args.cwd === 'string' ? args.cwd : process.cwd()

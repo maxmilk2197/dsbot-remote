@@ -56,7 +56,7 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
   async function start({ code, name, agent, cwd, groups: wanted } = {}) {
     const clean = String(code ?? '').replace(/[\s-]/g, '').toUpperCase()
     if (clean.length < 6) {
-      throw Object.assign(new Error('配对码是 6 位'), { code: 'node/bad-params' })
+      throw Object.assign(new Error('配对码位数不对（6–8 位）'), { code: 'node/bad-params' })
     }
     stop()
     // 主文件夹：这台机器自己选的根，主机浏览、run_shell、相对路径都从这儿算。
