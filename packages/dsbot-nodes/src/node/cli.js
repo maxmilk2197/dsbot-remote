@@ -171,6 +171,9 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
     method: 'node.hello',
     params: {
       name, deviceId, caps, workspace,
+      // 这台机器打算用哪个模型跑 turn。主机拿它在设置页和失败提示里显示 —
+      // 「余额不足」这类错误只有 provider/model 在场才说得清该去改哪一项。
+      ...(local === undefined ? {} : { model: { provider: local.provider, model: local.model } }),
       // 机器名：主机在没填名字时拿它当默认显示名（host/nodes/naming.js）。
       hostname: hostname(),
       ...(wanted.length === 0 ? {} : { wantedGroups: wanted }),

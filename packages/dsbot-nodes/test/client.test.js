@@ -45,7 +45,7 @@ test('404 时给出可执行的解释', () => {
 test('EasyTier 没准备好时给出下载 / 重试入口', () => {
   assert.match(source, /const et = state\?\.easytier/)
   assert.match(source, /etBusy \|\| etTrouble/)
-  assert.match(source, /jpost\('\/network'\)/)
+  assert.match(source, /jpost\('\/network', etMirror/)
   assert.match(source, /EasyTier（跨网用的组件）/)
 })
 

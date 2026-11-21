@@ -442,6 +442,15 @@
           ),
         ]),
 
+        // 它跑 turn 用哪个模型：出「余额不足」时先看这一行，再去那台机器换模型。
+        node.model
+          ? row([
+            label('模型'),
+            Tag({ children: node.model.provider + '/' + node.model.model }),
+            note('在那台机器的 DSH 里换模型后，要断开重连一次才生效'),
+          ])
+          : null,
+
         row([
           label('工作区'),
           node.workspace ? Tag({ children: node.workspace }) : note('未上报'),
@@ -591,6 +600,8 @@
       const [joinCode, setJoinCode] = React.useState('')
       const [joinAgent, setJoinAgent] = React.useState('')
       const [elevateScript, setElevateScript] = React.useState('')
+      // EasyTier 下载源：留空就用内置镜像列表（官方 + 三个加速站）。
+      const [etMirror, setEtMirror] = React.useState('')
       const [dialog, setDialog] = React.useState(false)
       // 已经为哪条连接自动弹过框（存 join.since）—— 换了连接才会再弹。
       const [askedFor, setAskedFor] = React.useState('')
@@ -779,14 +790,26 @@
               ? (et.message || '正在下载 EasyTier（约 30MB，只下一次）…')
               : `跨网组件没准备好：${et.message || '没找到'}`),
             note(`版本 ${et.version} · 装到 ${et.dir}`),
+            note(et.prefs?.mirror
+              ? `下载源：${et.prefs.mirror}`
+              : '下载源：官方 GitHub + 三个加速站，一条不通自动换下一条'),
             etBusy
               ? note('下完会自己接着进虚拟网，不用守着这页。')
-              : row([
-                Button({
-                  variant: 'primary',
-                  children: busy === 'network' ? '正在重试…' : '下载 / 重试',
-                  onClick: () => act('network', () => jpost('/network')),
+              : stack([
+                Input({
+                  value: etMirror,
+                  placeholder: '镜像地址（可选），例如 https://ghfast.top/',
+                  onChange: event => setEtMirror(event.target.value),
+                  style: { width: '100%' },
                 }),
+                row([
+                  Button({
+                    variant: 'primary',
+                    children: busy === 'network' ? '正在重试…' : '下载 / 重试',
+                    onClick: () => act('network', () => jpost('/network', etMirror.trim() === '' ? {} : { mirror: etMirror.trim() })),
+                  }),
+                  note('填了就记住：下次缺组件会先走这个源'),
+                ]),
                 note('只影响跨网；同一个 WiFi 下照常输码直连'),
               ]),
           ])

@@ -326,7 +326,17 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
               yield* closeText()
               // 节点发的是 message，早期的主机只认 error —— 两个都读，
               // 否则群里永远只有一句“节点报告本轮失败（error）”，原因全丢了。
-              const message = result.error ?? result.message ?? `节点报告本轮失败（${result.status}）`
+              const raw = result.error ?? result.message ?? `节点报告本轮失败（${result.status}）`
+              // 「余额不足」是那台机器上的模型账号在扣费，不是网络或插件的问题。
+              // 把 provider/model 一起说出来，否则用户只能挨个换模型试。
+              const node = this.deps.nodes?.()[nodeId]
+              const where = node?.model === undefined
+                ? ''
+                : `（远端模型 ${node.model.provider}/${node.model.model}）`
+              const hint = /insufficient|balance|余额|quota|402/i.test(String(raw))
+                ? ` —— 这轮是那台机器上的模型账号在扣费；在它的 DSH 里换一个有额度的模型，然后断开重连一次（模型在连接时选定）`
+                : ''
+              const message = `${raw}${where}${hint}`
               throw new LlmError(message, result.status === 'cancelled' ? 'NODE_CANCELLED' : 'NODE_TURN_FAILED')
             }
             // A node that answered in one piece instead of streaming still has

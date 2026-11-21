@@ -9,12 +9,16 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  DEFAULT_MIRRORS,
   cliName,
   coreName,
   easyTierAssetName,
   easyTierAssetUrl,
   easyTierCacheDir,
+  easyTierPrefs,
+  easyTierSources,
   findEasyTierBinaries,
+  saveEasyTierPrefs,
 } from '../src/node/easytier-fetch.js'
 import { findEasyTier } from '../src/node/easytier.js'
 
@@ -81,6 +85,37 @@ test('解压目录多一层也能找到可执行文件', async () => {
     assert.equal(findEasyTierBinaries(root, process.platform, { deep: false }), undefined)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('下载地址不是写死的：官方 + 内置镜像，设置里的排最前', () => {
+  const home = process.env.DSBOT_NODES_HOME
+  const mirrors = process.env.DSBOT_EASYTIER_MIRRORS
+  const single = process.env.DSBOT_EASYTIER_MIRROR
+  const direct = process.env.DSBOT_EASYTIER_URL
+  delete process.env.DSBOT_EASYTIER_MIRRORS
+  delete process.env.DSBOT_EASYTIER_MIRROR
+  delete process.env.DSBOT_EASYTIER_URL
+  process.env.DSBOT_NODES_HOME = join(tmpdir(), 'et-prefs-' + process.pid)
+  try {
+    const plain = easyTierSources('v2.6.4', 'win32', 'x64')
+    assert.ok(plain.some(source => source.url.startsWith('https://github.com/EasyTier/EasyTier/releases/download/')))
+    for (const mirror of DEFAULT_MIRRORS) {
+      assert.ok(plain.some(source => source.url.startsWith(mirror)), '缺少内置镜像 ' + mirror)
+    }
+
+    process.env.DSBOT_EASYTIER_MIRRORS = 'none'
+    assert.equal(easyTierSources('v2.6.4', 'win32', 'x64').length, 1)
+    delete process.env.DSBOT_EASYTIER_MIRRORS
+
+    saveEasyTierPrefs({ mirror: 'https://example.org/proxy/' })
+    assert.equal(easyTierPrefs().mirror, 'https://example.org/proxy/')
+    assert.ok(easyTierSources('v2.6.4', 'win32', 'x64')[0].url.startsWith('https://example.org/proxy/'))
+  } finally {
+    for (const [key, value] of [['DSBOT_NODES_HOME', home], ['DSBOT_EASYTIER_MIRRORS', mirrors], ['DSBOT_EASYTIER_MIRROR', single], ['DSBOT_EASYTIER_URL', direct]]) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 })
 

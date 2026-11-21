@@ -69,7 +69,10 @@ export function rotateLogsOnce({ force = false } = {}) {
   } catch {}
   try {
     mkdirSync(logsDir(), { recursive: true })
-    if (existsSync(logFile())) {
+    // 探针进程（DSH 启动时 import 一遍插件就退出）只写横幅和 module 行，从来没走到
+    // apply。它们每次启动都轮转一次，会把真正的上一次运行挤成 previous 再挤掉。
+    // 判据很简单：这份 current.log 里没有 "apply called" 就不是一次真启动，直接丢弃。
+    if (existsSync(logFile()) && readFileSync(logFile(), 'utf8').includes('apply called')) {
       rmSync(previousLogFile(), { force: true })
       renameSync(logFile(), previousLogFile())
     }

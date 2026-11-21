@@ -6,7 +6,7 @@
 import { listenDiscovery } from '../../protocol/transport/discovery.js'
 import { listenTcp } from '../../protocol/transport/tcp.js'
 import { EASYTIER_DIR, elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
-import { EASYTIER_VERSION } from '../../node/easytier-fetch.js'
+import { EASYTIER_VERSION, easyTierPrefs, saveEasyTierPrefs } from '../../node/easytier-fetch.js'
 
 export const DEFAULT_PORT = 7777
 
@@ -37,6 +37,8 @@ export function createHosting({
     dir: EASYTIER_DIR,
     core: null,
     message: '',
+    // 用户填过的下载源（设置页可改，存 <数据目录>/easytier.json）。
+    prefs: easyTierPrefs(),
     at: 0,
   }
   const setEasytier = (patch) => {
@@ -254,7 +256,19 @@ export function createHosting({
   }
 
   // 用户主动开跨网。默认关着（见 network 参数说明），点了才起 EasyTier。
-  async function enableNetwork() {
+  // options.mirror / options.url 来自设置页：填了就存下来，下次重启还在。
+  async function enableNetwork(options = {}) {
+    const mirror = String(options.mirror ?? '').trim()
+    const url = String(options.url ?? '').trim()
+    if (mirror !== '' || url !== '') {
+      try {
+        const saved = saveEasyTierPrefs({ ...(mirror === '' ? {} : { mirror }), ...(url === '' ? {} : { url }) })
+        setEasytier({ prefs: saved })
+        warn(`dsbot-nodes: EasyTier 下载源已保存：${mirror || url}`)
+      } catch (error) {
+        warn(`dsbot-nodes: 保存 EasyTier 下载源失败：${error?.message ?? error}`)
+      }
+    }
     if (current === null) return { ok: false, error: '还没有开始监听，先有个配对码' }
     network = 'auto'
     networkTried = null

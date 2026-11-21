@@ -322,11 +322,18 @@ function installOnce(rt) {
         // workspace 是那台机器自己选的主文件夹。空着就不覆盖已有记录 ——
         // Object.assign 会把 undefined 写上去，落盘时整条字段就没了。
         const workspace = String(params.workspace ?? '').trim()
+        // 那台机器挑的模型（provider/model）。只在它自己报的时候更新：
+        // 旧版节点不报，别把已有的值抹掉。
+        const reportedModel = params.model !== null && typeof params.model === 'object'
+          && typeof params.model.provider === 'string' && params.model.provider !== ''
+          ? { provider: params.model.provider.slice(0, 120), model: String(params.model.model ?? '').slice(0, 120) }
+          : undefined
         await store.update(nodeId, {
           status: 'online',
           lastSeenAt: Date.now(),
           caps: Array.isArray(params.caps) ? params.caps : [],
           ...(workspace === '' ? {} : { workspace: workspace.slice(0, 400) }),
+          ...(reportedModel === undefined ? {} : { model: reportedModel }),
         })
 
         // 名字变了（多半是从 127.0.0.1 变成对方的电脑名）：群里那个成员 Bot 跟着改，
@@ -1315,6 +1322,8 @@ function registerRoutes(rt, api, hosting) {
             // 那台机器选的主文件夹。主机靠它知道"它的工作区在哪"，
             // 也靠它给"浏览工作区"定根目录。
             workspace: node.workspace ?? '',
+            // 那台机器打算用哪个模型跑 turn（它连上来时自己报的）。
+            model: node.model ?? null,
             // 主机授权给它的群：设置页的"授权群组"就编辑这张表。
             allowed: allowedGroupsOf(rt, node).map(group => ({ id: group.id, name: group.name })),
             groups: (node.groups ?? []).map(id => {
@@ -1478,7 +1487,11 @@ function registerRoutes(rt, api, hosting) {
       // 跨网组件没准备好时，界面上的「下载 / 重试」走这里：重新找一遍，
       // 缺就下（带进度写进 status.easytier），下好了顺手把虚拟网起起来。
       if (req.method === 'POST' && path === '/api/nodes/network') {
-        return sendJson(res, 200, { ok: true, ...(await hosting.enableNetwork()) })
+        const body = await readBody(req)
+        return sendJson(res, 200, {
+          ok: true,
+          ...(await hosting.enableNetwork({ mirror: body?.mirror, url: body?.url })),
+        })
       }
       if (req.method === 'GET' && path === '/api/nodes/groups') {
         return sendJson(res, 200, { ok: true, groups: listGroups(rt) })
@@ -1774,7 +1787,11 @@ export function apply(ctx, config = {}) {
 // （真机上 apply 拿到的 ctx 一 get 就抛 inactive context）。逐个试，别只试一条路：
 // 早期路由挂不上，等不到 bot 服务时页面就只剩一句 404。
 function findWebServer(ctx) {
-  const notes = []
+  // 探测链里有几条是"预期会抛"的：cordis 不允许在没 inject 的上下文里 ctx.get，
+  // 抛出的是常规语义而不是故障。以前把每条抛错都写进日志，真机上就出现一行
+  // 「ctx.webServer 读 webServer 抛错: cannot get property ... without inject」——
+  // 看着像坏了，其实下一条路就拿到了。只在**全都拿不到**时才把这些原因交出去。
+  const failures = []
   const probes = [
     ['ctx.get', () => ctx.get?.('webServer')],
     ['ctx.webServer', () => ctx.webServer],
@@ -1786,14 +1803,13 @@ function findWebServer(ctx) {
     try {
       const server = probe()
       if (server?.register !== undefined) {
-        if (notes.length > 0) notes.push(`webServer 从 ${label} 拿到（前几条路失败过）`)
-        return { server, notes }
+        return { server, notes: failures.length === 0 ? [] : [`webServer 从 ${label} 拿到（前几条路失败过）`] }
       }
     } catch (error) {
-      notes.push(`${label} 读 webServer 抛错: ${error?.message ?? error}`)
+      failures.push(`${label} 读 webServer 抛错: ${error?.message ?? error}`)
     }
   }
-  return { server: undefined, notes }
+  return { server: undefined, notes: failures }
 }
 
 function applyPlugin(ctx, config = {}) {

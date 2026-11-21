@@ -5,10 +5,14 @@
  * 仓库不再内置 33MB 的二进制：第一次真正要跨网时，按当前平台从官方 Release
  * 下载一次，缓存在 ~/.dsh/dsbot-nodes/easytier/<版本>/<平台-架构>/，之后直接复用。
  *
- * 三个可调的环境变量（都不需要改代码）：
+ * 下载源不是一个写死的地址：显式镜像 → 官方 → 内置镜像，一条不通自动换下一条；
+ * 每条地址还会依次试直连和系统/常见代理。发布版里用户能改的入口有两个——
+ * 设置页「远程节点 → EasyTier」里填镜像（存进 <数据目录>/easytier.json，重启仍在），
+ * 或者下面这些环境变量（部署脚本/离线环境用）：
  *   DSBOT_EASYTIER_DIR     已经手动装好的目录，优先用它，不下载
- *   DSBOT_EASYTIER_MIRROR  镜像前缀，例如 https://ghfast.top/（拼在 GitHub 地址前）
  *   DSBOT_EASYTIER_URL     直接给一个 zip 地址，跳过拼装
+ *   DSBOT_EASYTIER_MIRROR  单个镜像前缀，例如 https://ghfast.top/（拼在 GitHub 地址前）
+ *   DSBOT_EASYTIER_MIRRORS 一组镜像前缀（逗号分隔）；写 none 就只走官方
  *   DSBOT_EASYTIER_VERSION 换版本，默认下面的 EASYTIER_VERSION
  */
 import { spawn } from 'node:child_process'
@@ -16,12 +20,93 @@ import { createHash } from 'node:crypto'
 import { chmodSync, cpSync, createWriteStream, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dataHome } from '../shared/paths.js'
 import { join, resolve, sep } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 export const EASYTIER_VERSION = process.env.DSBOT_EASYTIER_VERSION || 'v2.6.4'
 
 const RELEASE_BASE = 'https://github.com/EasyTier/EasyTier/releases/download'
+
+/**
+ * 内置镜像：GitHub 加速站的通用形式是「前缀 + 原始 URL」。
+ * 国内直连 github.com 经常就是 curl (7) 连不上，而发布版不能指望用户去设环境变量，
+ * 所以默认带上几个公开镜像；一条不通就换下一条，全都失败才报错。
+ * 想只走官方：DSBOT_EASYTIER_MIRRORS=none。
+ */
+export const DEFAULT_MIRRORS = [
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+]
+
+const PREFS_FILE = 'easytier.json'
+
+const trimSlash = (value) => String(value ?? '').trim().replace(/\/+$/, '')
+
+function hostOf(value) {
+  try { return new URL(trimSlash(value)).host } catch { return '' }
+}
+
+/** 设置页填的下载偏好（镜像 / 直链）。读不到、写坏了都当没配过，不影响兜底逻辑。 */
+export function easyTierPrefs() {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dataHome(), PREFS_FILE), 'utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 只写认得的三个键：这个文件允许用户手工编辑，别把任意字段透传进去。 */
+export function saveEasyTierPrefs(patch = {}) {
+  const next = { ...easyTierPrefs() }
+  for (const key of ['mirror', 'url', 'version']) {
+    if (typeof patch?.[key] === 'string') next[key] = patch[key].trim()
+  }
+  try {
+    mkdirSync(dataHome(), { recursive: true })
+    writeFileSync(join(dataHome(), PREFS_FILE), JSON.stringify(next, null, 2))
+  } catch {}
+  return next
+}
+
+/** 这一轮能用的镜像前缀：环境变量 > 设置页 > 内置。显式配了 none 就一个都不用。 */
+export function easyTierMirrors() {
+  const raw = String(process.env.DSBOT_EASYTIER_MIRRORS ?? '').trim()
+  if (raw !== '') {
+    if (/^(none|off|0|false)$/i.test(raw)) return []
+    return raw.split(',').map(each => trimSlash(each)).filter(Boolean)
+  }
+  const own = trimSlash(easyTierPrefs().mirror)
+  const builtin = DEFAULT_MIRRORS.map(each => trimSlash(each)).filter(Boolean)
+  return own === '' ? builtin : [own, ...builtin.filter(each => each !== own)]
+}
+
+/**
+ * 一次下载依次要试的地址。顺序按"最可能通"排：显式镜像 → 官方 → 其余镜像。
+ * 直链（DSBOT_EASYTIER_URL / 设置页 url）优先，给了就只用它 —— 那是用户明确指定的一份文件。
+ */
+export function easyTierSources(version = EASYTIER_VERSION, platform = process.platform, arch = process.arch) {
+  const direct = String(process.env.DSBOT_EASYTIER_URL ?? '').trim() || String(easyTierPrefs().url ?? '').trim()
+  if (direct !== '') return [{ label: '自定义地址', url: direct }]
+  const name = easyTierAssetName(version, platform, arch)
+  if (name === undefined) return []
+  const full = `${RELEASE_BASE}/${version}/${name}`
+  const list = []
+  const push = (label, url) => {
+    if (url === '' || list.some(each => each.url === url)) return
+    list.push({ label, url })
+  }
+  const mirrors = easyTierMirrors()
+  const explicit = trimSlash(process.env.DSBOT_EASYTIER_MIRROR)
+  if (explicit !== '') push(hostOf(explicit) || '环境变量里的镜像', `${explicit}/${full}`)
+  // 设置页填的那个排在最前：用户就是为这台机器挑的线路，最可能通。
+  const fromSettings = String(process.env.DSBOT_EASYTIER_MIRRORS ?? '').trim() === '' ? trimSlash(easyTierPrefs().mirror) : ''
+  if (fromSettings !== '' && fromSettings !== explicit) push(hostOf(fromSettings) || '设置里的镜像', `${fromSettings}/${full}`)
+  push('官方 GitHub', full)
+  for (const mirror of mirrors) push(hostOf(mirror) || mirror, `${mirror}/${full}`)
+  return list
+}
 
 // 官方 Release 的资源名不是 Node 的 platform-arch：这里做一次映射。
 const SLUGS = {
@@ -52,13 +137,7 @@ export function easyTierAssetName(version = EASYTIER_VERSION, platform = process
 }
 
 export function easyTierAssetUrl(version = EASYTIER_VERSION, platform = process.platform, arch = process.arch) {
-  const direct = String(process.env.DSBOT_EASYTIER_URL ?? '').trim()
-  if (direct !== '') return direct
-  const name = easyTierAssetName(version, platform, arch)
-  if (name === undefined) return undefined
-  const full = `${RELEASE_BASE}/${version}/${name}`
-  const mirror = String(process.env.DSBOT_EASYTIER_MIRROR ?? '').trim()
-  return mirror === '' ? full : `${mirror.replace(/\/+$/, '')}/${full}`
+  return easyTierSources(version, platform, arch)[0]?.url
 }
 
 /** 缓存根目录：跟 DSH 的其它数据放一起，卸载插件也不会误删。 */
@@ -197,6 +276,66 @@ function downloadWithCurl(url, zip, proxy, onLog) {
   })
 }
 
+// fetch 版：没有 curl 的机器（精简版 Windows、某些容器）也要能下。
+async function downloadWithFetch(url, zip, onLog) {
+  try {
+    const response = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(180_000),
+    })
+    if (!response.ok || response.body === null) return { ok: false, error: `HTTP ${response.status}` }
+    let seen = 0
+    let lastLogged = 0
+    const meter = new Transform({
+      transform(chunk, _encoding, callback) {
+        seen += chunk.length
+        if (seen - lastLogged >= 4 * 1024 * 1024) {
+          lastLogged = seen
+          onLog(`已下载 ${(seen / 1048576).toFixed(1)} MB`)
+        }
+        callback(null, chunk)
+      },
+    })
+    await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(zip))
+    return { ok: true }
+  } catch (error) {
+    const reason = error?.name === 'TimeoutError' ? '超过 180 秒没下完' : (error?.message ?? String(error))
+    return { ok: false, error: reason }
+  }
+}
+
+// 一条来源不通就换下一条；有 curl 时再叠加系统代理。
+// 外层是代理、内层是来源：先把所有来源直连试一遍，都不通才走代理 ——
+// 代理往往是最慢的那条路，不该抢在镜像前面。
+async function fetchAny(sources, zip, onLog) {
+  const attempts = []
+  const record = (source, proxy, error) => {
+    const via = proxy === undefined ? '直连' : String(proxy).replace(/^[a-z+]+:\/\//i, '')
+    const line = `${source.label}（${via}）：${String(error ?? '').trim() || '失败'}`
+    attempts.push(line)
+    onLog(`下载失败：${line}`)
+  }
+  const curl = await hasCurl()
+  if (!curl) {
+    for (const source of sources) {
+      try { quietRemove(zip) } catch {}
+      const result = await downloadWithFetch(source.url, zip, onLog)
+      if (result.ok) return { used: source, attempts }
+      record(source, undefined, result.error)
+    }
+    return { used: undefined, attempts }
+  }
+  for (const proxy of [undefined, ...proxyCandidates()]) {
+    for (const source of sources) {
+      try { quietRemove(zip) } catch {}
+      const result = await downloadWithCurl(source.url, zip, proxy, onLog)
+      if (result.ok) return { used: source, attempts }
+      record(source, proxy, result.error)
+    }
+  }
+  return { used: undefined, attempts }
+}
+
 function run(command, args) {
   return new Promise((resolve) => {
     let stderr = ''
@@ -248,19 +387,20 @@ async function download({ version, onLog, force }) {
     }
   }
 
-  const url = easyTierAssetUrl(version)
-  if (url === undefined) {
+  const sources = easyTierSources(version)
+  if (sources.length === 0) {
     throw new Error(`EasyTier 没有 ${process.platform}-${process.arch} 的官方包，请手动安装并设置 DSBOT_EASYTIER_DIR`)
   }
-
-  let parsedUrl
-  try {
-    parsedUrl = new URL(url)
-  } catch {
-    throw new Error('EasyTier 的下载地址不是一个 URL：' + url)
-  }
-  if (parsedUrl.protocol !== 'https:' && process.env.DSBOT_EASYTIER_ALLOW_HTTP !== '1') {
-    throw new Error('拒绝从非 https 地址下载 EasyTier（' + parsedUrl.protocol + '）：' + url)
+  for (const source of sources) {
+    let parsedUrl
+    try {
+      parsedUrl = new URL(source.url)
+    } catch {
+      throw new Error('EasyTier 的下载地址不是一个 URL：' + source.url)
+    }
+    if (parsedUrl.protocol !== 'https:' && process.env.DSBOT_EASYTIER_ALLOW_HTTP !== '1') {
+      throw new Error('拒绝从非 https 地址下载 EasyTier（' + parsedUrl.protocol + '）：' + source.url)
+    }
   }
 
   mkdirSync(dir, { recursive: true })
@@ -271,51 +411,14 @@ async function download({ version, onLog, force }) {
   const stage = join(dir, `.stage-${stamp}`)
   onLog(`没找到 EasyTier，开始下载 ${version}（约 30MB，只下一次）`)
 
-  // curl 能自动走系统代理；没有 curl 的机器退回 fetch（不认系统代理，但能直连）。
-  let lastError
-  if (await hasCurl()) {
-    const routes = [undefined, ...proxyCandidates()]
-    for (const proxy of routes) {
-      quietRemove(zip)
-      onLog(proxy === undefined ? '开始下载（直连）' : `开始下载（代理 ${proxy}）`)
-      const result = await downloadWithCurl(url, zip, proxy, onLog)
-      if (result.ok) { lastError = undefined; break }
-      lastError = result.error
-      onLog(`这条不通：${result.error}`)
-    }
-    if (lastError !== undefined) {
-      quietRemove(zip)
-      throw new Error(
-        `下载失败（直连和代理都试过了）：${lastError}。`
-        + `可以设置 DSBOT_EASYTIER_MIRROR 走镜像，或手动解压到 ${dir}`,
-      )
-    }
-  } else {
-    let response
-    try {
-      response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(180_000) })
-    } catch (error) {
-      throw new Error(`下载失败（${error?.message ?? error}）。可以手动解压到 ${dir}`)
-    }
-    if (!response.ok || response.body === null) {
-      throw new Error(`下载失败：HTTP ${response.status} ${response.statusText ?? ''}`.trim())
-    }
-    const body = Readable.fromWeb(response.body)
-    let received = 0
-    let lastLogged = 0
-    body.on('data', (chunk) => {
-      received += chunk.length
-      if (received - lastLogged >= 4 * 1024 * 1024) {
-        lastLogged = received
-        onLog(`已下载 ${(received / 1048576).toFixed(1)} MB`)
-      }
-    })
-    try {
-      await pipeline(body, createWriteStream(zip))
-    } catch (error) {
-      quietRemove(zip)
-      throw new Error(`下载中断：${error?.message ?? error}`)
-    }
+  // 每个来源都试：先直连，再依次过常见代理；一条成功就停。
+  const { used, attempts } = await fetchAny(sources, zip, onLog)
+  if (used === undefined) {
+    const head = attempts.slice(0, 3).join('；')
+    throw new Error(
+      `下载失败（试了 ${sources.length} 个来源、${attempts.length} 条线路${head === '' ? '' : '：' + head}）。`
+      + `可以在设置页「远程节点 → EasyTier」里填镜像地址再点重试，或把解压好的目录放到 ${dir}`,
+    )
   }
 
   // 包本身也记一笔：设了 DSBOT_EASYTIER_SHA256 就当成硬约束比对，
