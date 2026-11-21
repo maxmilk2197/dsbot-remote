@@ -113,3 +113,39 @@ export function ensureDsbotProvide({ dir } = {}) {
     return { status: 'error', file: target.file, text: `ds-bot v${version} 自补失败（${error?.message ?? error}）：手动在 ${target.file} 的锚点行后加 ctx.provide('bot', rt)` }
   }
 }
+
+// 第二个补丁：镜像群不派活。
+// ds-bot 的 openingCall 决定这一轮由谁来答。镜像群里的替身 Bot 只是「名单上的名字」，
+// 真跑一轮就会用本地模型替主机的人说话 —— 截图里三条回复全挂在同一个 Bot 名下就是这么来的。
+// 给镜像群的 room 打上 mirror: true 之后这里返回空名单：用户的行照旧写进群，
+// 但没有成员被叫起来，主机那边的回声才是唯一的声音。
+export const OPENING_ANCHOR = 'function openingCall(room, opener) {'
+const QUIET_INSERT = '\n    if (room.mirror === true) return { speakers: [], ordered: false }'
+const QUIET_MARKER = /room\.mirror === true/
+
+function quietFile(pkgDir) {
+  if (pkgDir === undefined) return undefined
+  const file = join(pkgDir, 'src', 'host', 'groups.js')
+  try {
+    if (!statSync(file).isFile()) return undefined
+    return { file, source: readFileSync(file, 'utf8') }
+  } catch { return undefined }
+}
+
+export function ensureDsbotQuiet({ dir } = {}) {
+  if (skipped()) return { status: 'skipped', file: '', text: '镜像群静默：跳过（测试或显式关闭）' }
+  const pkgDir = dsbotPackageDir(dir)
+  if (pkgDir === undefined) return { status: 'missing', file: '', text: '镜像群静默：找不到 ds-bot 包' }
+  const target = quietFile(pkgDir)
+  if (target === undefined) return { status: 'missing', file: pkgDir, text: `镜像群静默：没找到 ${join(pkgDir, 'src', 'host', 'groups.js')}` }
+  if (QUIET_MARKER.test(target.source)) return { status: 'ok', file: target.file, text: '镜像群静默：已在位（groups.js）' }
+  if (!target.source.includes(OPENING_ANCHOR)) return { status: 'unmatched', file: target.file, text: `镜像群静默：groups.js 里没有锚点 ${OPENING_ANCHOR}（版本改了写法）` }
+  try {
+    const backup = target.file + '.bak-dsbot-mirror'
+    if (!existsSync(backup)) copyFileSync(target.file, backup)
+    writeFileSync(target.file, target.source.replace(OPENING_ANCHOR, OPENING_ANCHOR + QUIET_INSERT))
+    return { status: 'patched', file: target.file, text: '镜像群静默：已写上（groups.js，重启 DSH 生效）' }
+  } catch (error) {
+    return { status: `error`, file: target.file, text: `镜像群静默失败（${error?.message ?? error}）` }
+  }
+}

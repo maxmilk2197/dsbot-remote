@@ -39,6 +39,29 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
   const rooms = () => Object.values(rt?.state?.rooms ?? {})
   const keyOf = hostRoomId => `${hostId}|${hostRoomId}`
 
+  // 镜像群的记号：写入 room.mirror = true 之后，ds-bot 的 openingCall（插件启动时自补）
+  // 见到它就不叫任何成员 —— 镜像群只是镜子，说话的是主机那边的人。
+  function markMirror(room) {
+    if (room === undefined || room.mirror === true) return false
+    room.mirror = true
+    return true
+  }
+
+  // 本机刚发回主机的那句话：主机会把它当用户消息写进主机群，再推回来一条一模一样的。
+  // 20 秒内同文只吞一次，免得把别人真的重复发言也吃掉。
+  const sentTexts = []
+  function rememberSent(text) {
+    sentTexts.push({ text, at: Date.now() })
+    while (sentTexts.length > 20) sentTexts.shift()
+  }
+  function takeSent(text) {
+    const now = Date.now()
+    const index = sentTexts.findIndex(each => each.text === text && now - each.at < 20_000)
+    if (index < 0) return false
+    sentTexts.splice(index, 1)
+    return true
+  }
+
   async function load() {
     if (loaded !== null) return loaded
     loaded = (async () => {
@@ -147,8 +170,10 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       const room = await rt.createRoom({
         members,
         name: wanted,
-        // 关键：没有 admin，ds-bot 就不会把普通消息派给任何成员。
-        // 有 admin 的话，你在镜像群说一句话，本地 Bot 就会跑一轮，和主机重复回应。
+        // 建群时不带 admin：建群过程中不派活。真正的「不许成员说话」靠下面这行
+        // room.mirror = true —— 插件启动时会给 ds-bot 的 openingCall 打补丁，见到它就
+        // 返回空名单。以前以为 admin:null 就不会派活，其实正好相反：没有 admin 时
+        // 所有成员都会答，于是镜像群里的替身 Bot 用自己的模型替主机的人发言。
         admin: null,
       })
       mirrors.set(key, room.id)
@@ -224,6 +249,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
   async function write(params, lines) {
     const room = await ensure(params)
     if (room === undefined) return { written: 0 }
+    const marked = markMirror(room)
     // 每条推送都带一遍成员表：主机那边加了人，这边下一次就跟着变。
     await syncMembers(room, params?.bots)
     const roomObj = params?.room ?? {}
@@ -235,6 +261,8 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     for (const line of lines ?? []) {
       const text = String(line?.text ?? '')
       if (text === '') continue
+      // 自己刚从这边发出去的话被主机推回来了：跳过，群里不多一份。
+      if (line?.botId === undefined && line?.kind === undefined && takeSent(text)) { stale += 1; continue }
       const seq = Number(line?.seq)
       const sequenced = Number.isFinite(seq) && seq > 0
       // 快照会把最后一段重发一遍：序号不比水位新的，本地已经有了。
@@ -252,7 +280,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       written += 1
     }
     await rt.save?.()
-    if (written > 0) await save()
+    if (written > 0 || marked) await save()
     // 这几个数字是排「主机发的消息没到」用的：收到几条、写进去几条、水位在哪。
     return { written, room, received: (lines ?? []).length, stale, level: entry.seq }
   }
@@ -274,6 +302,11 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
   function onLocalLine(room, record) {
     if (record?.mirror === true) return false
     if (peer === null) return false
+    // 只转「人」的话。镜像群里的替身 Bot 不开口（见 markMirror）；主机 Bot 说过的话
+    // 已经由主机推过来了，再回传就是自己跟自己说话。kind 行是状态（working/done/notice），
+    // 也不属于对话。
+    if (record?.botId !== undefined) return false
+    if (record?.kind !== undefined) return false
     const hit = [...mirrors].find(([, local]) => local === room?.id)
     // key 是 `${hostId}|${主机群 id}`：回给主机的是后半段。
     const hostRoomId = hit === undefined ? undefined : hit[0].slice(hit[0].indexOf('|') + 1)
@@ -281,6 +314,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     const text = String(record?.text ?? '').trim()
     if (text === '') return false
     peer.send({ method: 'node.post', params: { groupId: hostRoomId, text } })
+    rememberSent(text)
     warn(`发到主机群：${text}`)
     return true
   }
@@ -315,6 +349,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       if (id === '') continue
       const room = await ensure({ roomId: id, roomName: group.name ?? group.roomName })
       if (room !== undefined) {
+        if (markMirror(room)) await save()
         await syncMembers(room, group.bots)
         made += 1
       }

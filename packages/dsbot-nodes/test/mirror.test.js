@@ -152,6 +152,42 @@ test('不是镜像群的发言不往外发（别把本地别的群搅进来）',
   assert.deepEqual(peer.sent, [])
 })
 
+test('镜像群打上 mirror 标记：ds-bot 见到它就不叫成员（自补的 openingCall 补丁）', async () => {
+  const { rt, state } = fakeRt()
+  const mirror = createMirror({ rt })
+
+  await mirror.write({ roomId: 'host-1', roomName: '测试' }, [{ who: 'Chief', text: '开干' }])
+
+  assert.equal(state.rooms['room-1'].mirror, true, '没有这个标记，替身 Bot 会用自己的模型替主机发言')
+})
+
+test('镜像群里的 Bot 说话不回传：主机推过来的话已经在这边了', async () => {
+  const { rt, emitLine } = fakeRt()
+  const mirror = createMirror({ rt })
+  const peer = fakePeer()
+  mirror.bind(peer)
+  const room = await mirror.ensure({ roomId: 'host-1', roomName: '测试' })
+
+  emitLine(room, { who: 'Chief', botId: 'b0', text: '我来答' })
+  emitLine(room, { who: 'Chief', botId: 'b0', text: '状态', kind: 'working' })
+
+  assert.deepEqual(peer.sent, [], 'Bot 的话不该回传主机（主机的话回传就是自己跟自己说）')
+})
+
+test('自己发出去的话被主机推回来：群里不多一份', async () => {
+  const { rt, calls, emitLine } = fakeRt()
+  const mirror = createMirror({ rt })
+  const peer = fakePeer()
+  mirror.bind(peer)
+  const room = await mirror.ensure({ roomId: 'host-1', roomName: '测试' })
+
+  emitLine(room, { who: '你', text: '查一下磁盘' })
+  await mirror.write({ roomId: 'host-1', roomName: '测试' }, [{ who: 'User', text: '查一下磁盘' }])
+
+  assert.equal(peer.sent.length, 1, '先回传给主机')
+  assert.equal(calls.logged.length, 0, '主机再推回来的同一句不该写第二遍')
+})
+
 test('主机给了成员名单：镜像群成员跟着变成同一批 Bot（同名的借，缺的造）', async () => {
   const { rt, calls, state } = fakeRt()
   const mirror = createMirror({ rt })

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { ANCHOR, ensureDsbotProvide, inspectDsbot } from '../src/host/nodes/selfpatch.js'
+import { ANCHOR, ensureDsbotProvide, ensureDsbotQuiet, inspectDsbot } from '../src/host/nodes/selfpatch.js'
 
 function fakePackage({ name = 'index.js', source, version = '0.3.8', main = 'plugin.js' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsbot-selfpatch-'))
@@ -84,6 +84,36 @@ test('自补：解析不到 ds-bot 时退到 profile 目录里找', () => {
   process.env.DSBOT_NODES_TEST = '1'
 })
 
+test('自补：镜像群静默补丁插到 openingCall 开头', () => {
+  delete process.env.DSBOT_NODES_TEST
+  const dir = fakePackage({ source: RUNTIME })
+  mkdirSync(join(dir, 'src', 'host'), { recursive: true })
+  const groups = "import x from 'y'\n\nfunction openingCall(room, opener) {\n  const everyone = []\n}\n"
+  writeFileSync(join(dir, 'src', 'host', 'groups.js'), groups)
+
+  const result = ensureDsbotQuiet({ dir })
+
+  assert.equal(result.status, 'patched')
+  const patched = readFileSync(join(dir, 'src', 'host', 'groups.js'), 'utf8')
+  assert.ok(patched.includes('function openingCall(room, opener) {\n    if (room.mirror === true) return { speakers: [], ordered: false }'))
+  assert.equal(readFileSync(join(dir, 'src', 'host', 'groups.js.bak-dsbot-mirror'), 'utf8'), groups)
+  assert.equal(ensureDsbotQuiet({ dir }).status, 'ok', '第二次不重复插')
+  process.env.DSBOT_NODES_TEST = '1'
+})
+
+test('自补：groups.js 里没有 openingCall（上游改了写法）就报 unmatched', () => {
+  delete process.env.DSBOT_NODES_TEST
+  const dir = fakePackage({ source: RUNTIME })
+  mkdirSync(join(dir, 'src', 'host'), { recursive: true })
+  const groups = 'export const nothing = 1\n'
+  writeFileSync(join(dir, 'src', 'host', 'groups.js'), groups)
+
+  const result = ensureDsbotQuiet({ dir })
+
+  assert.equal(result.status, 'unmatched')
+  assert.equal(readFileSync(join(dir, 'src', 'host', 'groups.js'), 'utf8'), groups)
+  process.env.DSBOT_NODES_TEST = '1'
+})
 test('自补：能顺着 plugin.js 壳点名真正的实现文件（不误报）', () => {
   delete process.env.DSBOT_NODES_TEST
   const dir = fakePackage({ source: RUNTIME })

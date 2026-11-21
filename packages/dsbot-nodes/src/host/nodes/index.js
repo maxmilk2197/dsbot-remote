@@ -50,7 +50,7 @@ import { connectTcp } from '../../protocol/transport/tcp.js'
 import { directionAllows, methodOf } from '../../protocol/methods.js'
 import { validateFields } from '../../protocol/validate.js'
 import { claimInstance, guardStats, newModuleId, releaseInstance, resetGuard } from './guard.js'
-import { ensureDsbotProvide, inspectDsbot } from './selfpatch.js'
+import { ensureDsbotProvide, ensureDsbotQuiet, inspectDsbot } from './selfpatch.js'
 import { appendLog, dataHome, logFile, migrateLegacyData } from '../../shared/paths.js'
 
 export const name = 'dsbot-nodes'
@@ -529,6 +529,28 @@ function installOnce(rt) {
     const text = String(params.text ?? '').trim()
     if (text === '') {
       refuse('node/bad-params', '要说什么？')
+      return
+    }
+    // 身份：远端这句话是谁说的？
+    //   params.botId —— 主机这边的成员 id（远端替身 Bot 转述时带）
+    //   没有 botId  —— 人。他在镜像群里打的字，在主机群里也该显示成他打的。
+    const asBot = typeof params.botId === 'string' && params.botId !== '' ? rt.botOf?.(params.botId) : undefined
+    if (asBot !== undefined && (room.members ?? []).includes(asBot.id) && typeof rt.postToRoom === 'function') {
+      const posted = await rt.postToRoom(room, asBot, text)
+      answer({ result: { ok: true, groupId: room.id, at: Date.now(), seq: posted?.seq ?? posted?.record?.seq } })
+      return
+    }
+    // 人的话走 ds-bot 自己的用户入口（和小窗里发消息同一条路）：群里显示成用户，
+    // 主机的 Bot 照常回应。以前一律 rt.postToRoom(room, 节点 Bot, …)，所以远端发的每句
+    // 话都变成了那个 Bot 说的，主机群里的身份全被压平。
+    if (typeof rt.sendUser === 'function') {
+      try {
+        await rt.sendUser({ sessionId: room.id, content: [{ type: 'text', text }] })
+      } catch (error) {
+        refuse('node/failed', `主机没把这句话发进群：${error?.message ?? error}`)
+        return
+      }
+      answer({ result: { ok: true, groupId: room.id, at: Date.now() } })
       return
     }
     if (typeof rt.postToRoom !== 'function') {
@@ -1746,6 +1768,9 @@ function applyPlugin(ctx, config = {}) {
   const selfpatch = ensureDsbotProvide()
   selfpatchNote = selfpatch.text
   bootNote(selfpatch.text)
+  // 第二个补丁和它一起报：镜像群该不该派活由 ds-bot 的源码决定。
+  const quiet = ensureDsbotQuiet()
+  bootNote(quiet.text)
   if (isDisabled()) {
     bootNote('disabled by nodes-off')
     return
