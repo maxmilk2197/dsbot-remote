@@ -521,10 +521,24 @@
               variant: 'primary',
               disabled: busy === 'allow',
               children: busy === 'allow' ? '保存中…' : '保存',
-              onClick: async () => {
-                const ok = await act('allow', () => jpost('/allow', { node: node.id, groups: allowed }))
-                if (ok) { setAllowing(false); setNotice('授权已更新') }
-              },
+              onClick: () => act(
+                'allow',
+                () => jpost('/allow', { node: node.id, groups: allowed }),
+                result => {
+                  setAllowing(false)
+                  const failures = result?.failures ?? []
+                  const bound = result?.bound ?? []
+                  if (failures.length > 0) {
+                    setError('授权已保存，但这几个群没进去：' + failures
+                      .map(each => (each.name || each.id) + '（' + each.reason + '）')
+                      .join('；'))
+                    return
+                  }
+                  setNotice(bound.length > 0
+                    ? '授权已更新，已放进 ' + bound.map(each => '「' + each.name + '」').join('、')
+                    : '授权已更新')
+                },
+              ),
             }),
             Button({ children: '取消', onClick: () => setAllowing(false) }),
           ]),

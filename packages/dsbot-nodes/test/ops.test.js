@@ -154,6 +154,28 @@ test('① 配对 + ② 发言：授权后进群，说一句落到群里', async 
   })
 })
 
+test('②b 勾上就进群：授权时顺手把人放进去，不等远端再要一次', async () => {
+  await withPair(async ({ api, node, rt }) => {
+    assert.deepEqual(rt.state.rooms.g1.members, ['chief'], '一开始群里只有 Chief')
+    const result = await api.allow({ nodeId: node.id, groups: ['g1'] })
+    assert.equal(result.bound.length, 1, '授权就该进群')
+    assert.equal(result.failures.length, 0)
+    assert.equal(rt.state.rooms.g1.members.length, 2, '群里要多出这个远程成员')
+    assert.equal(result.node.groups.includes('g1'), true, '记录里要写上进了哪个群')
+  })
+})
+
+test('②c 进不去的群不挡住授权：原因原样带回界面', async () => {
+  await withPair(async ({ api, node, rt }) => {
+    await api.store.update(node.id, { caps: ['exec'] })
+    const result = await api.allow({ nodeId: node.id, groups: ['g1'] })
+    assert.equal(result.bound.length, 0)
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0].reason, /agent/)
+    assert.deepEqual(rt.state.rooms.g1.members, ['chief'], '没进去就别硬塞')
+  })
+})
+
 test('③ 收回授权：成员被移出群，之后不能再说话', async () => {
   await withPair(async ({ api, ctrl, node, rt }) => {
     await api.allow({ nodeId: node.id, groups: ['g1'] })

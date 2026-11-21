@@ -939,6 +939,7 @@ ${links.join(' ')}`
       if (node === undefined) throw new LlmError(`没有这个节点：${nodeId}`, 'node/not-found')
       const ids = [...new Set((Array.isArray(groups) ? groups : [])
         .filter(id => typeof id === 'string' && id !== ''))]
+      const before = new Set([...(node.allowedGroups ?? []), ...(node.groups ?? [])])
       await store.update(nodeId, { allowedGroups: ids })
       // 收回授权就等于把人请出去：留着一个"能看不能说的成员"只会让人困惑。
       for (const joined of [...(node.groups ?? [])]) {
@@ -946,7 +947,29 @@ ${links.join(' ')}`
         await unbindNodeFromGroup({ rt, store, nodeId, groupId: joined }).catch(error =>
           warn('dsbot-nodes: 收回「%s」授权时退出失败：%s', joined, error?.message ?? error))
       }
-      return { allowed: ids, node: store.node(nodeId) }
+      // 勾上就等于让它进这个群。只写授权表的话，界面回一句"已更新"，群里却一个人都没多 ——
+      // 用户看到的就是"加群后没反应"。绑不上的原因原样带回去，别让它只留在日志里。
+      const bound = []
+      const failures = []
+      for (const id of ids) {
+        if (before.has(id)) continue
+        const room = rt.roomOf?.(id)
+        if (room === undefined) {
+          failures.push({ id, name: id, reason: '这个群已经不在了' })
+          continue
+        }
+        try {
+          const result = await api.bind({ nodeId, groupId: id, name: node.name })
+          bound.push({ id, name: result?.botName ?? room.name ?? id })
+          bootNote(`授权即进群：${node.name} → 「${room.name || id}」（${result?.botName ?? ''}）`)
+        } catch (error) {
+          const reason = String(error?.message ?? error)
+          failures.push({ id, name: room.name || id, reason })
+          bootNote(`授权后进群失败：${node.name} → 「${room.name || id}」：${reason}`)
+          warn('dsbot-nodes: 把 %s 放进「%s」失败：%s', node.name, room.name, reason)
+        }
+      }
+      return { allowed: ids, node: store.node(nodeId), bound, failures }
     },
     // 配对码：界面与工具共用同一份状态。
     hosting,
@@ -1376,6 +1399,8 @@ function registerRoutes(rt, api, hosting) {
         return sendJson(res, 200, {
           ok: true,
           allowed: result.allowed,
+          bound: result.bound ?? [],
+          failures: result.failures ?? [],
           node: api.list().find(each => each.id === node.id) ?? null,
         })
       }

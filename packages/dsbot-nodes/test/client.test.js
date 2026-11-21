@@ -10,6 +10,12 @@ import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 const COMPONENTS = ['Panel', 'ChatBox', 'NodeCard', 'JoinDialog', 'FolderPicker']
 
+test('授权保存后要说清楚把谁放进了哪些群', () => {
+  assert.match(source, /授权已保存，但这几个群没进去/, '绑不上要把原因写出来，不能只回一句已更新')
+  assert.match(source, /result\?\.failures/, '要读服务端带回的 failures')
+  assert.match(source, /已放进 '/, '成功时要说进了哪些群')
+})
+
 test('组件只通过 h() 渲染，不能当普通函数直接调用', () => {
   const offenders = []
   for (const name of COMPONENTS) {
