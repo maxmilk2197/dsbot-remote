@@ -5,7 +5,8 @@
 // 当握手的 KDF 盐（v2 起码不再明文上网）。换码 = rotate()，旧码立刻失效。
 import { listenDiscovery } from '../../protocol/transport/discovery.js'
 import { listenTcp } from '../../protocol/transport/tcp.js'
-import { elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
+import { EASYTIER_DIR, elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
+import { EASYTIER_VERSION } from '../../node/easytier-fetch.js'
 
 export const DEFAULT_PORT = 7777
 
@@ -28,6 +29,19 @@ export function createHosting({
   let vnet = null
   // 起失败过就别反复试：每次失败都拉一个进程、写一堆日志，没用。
   let networkTried = null
+  // EasyTier 这个组件在不在、要不要下、下到哪一步 —— 界面上得看得见。
+  // 以前只往日志里写一行，用户那边一直停在「正在进虚拟网…」，像卡死了。
+  let easytier = {
+    state: 'unknown', // unknown | checking | downloading | ready | missing | error
+    version: EASYTIER_VERSION,
+    dir: EASYTIER_DIR,
+    core: null,
+    message: '',
+    at: 0,
+  }
+  const setEasytier = (patch) => {
+    easytier = { ...easytier, ...patch, at: Date.now() }
+  }
 
   async function ensureCode() {
     const { code } = await store.host()
@@ -147,19 +161,32 @@ export function createHosting({
     const subnets = localSubnets()
     virtual = { on: false, ipv4: null, name: pairCredentials(code).networkName, error: null, zeroTun: true, lan: lan ?? null, subnets }
 
+    setEasytier({ state: 'checking', message: `正在找 EasyTier（${EASYTIER_VERSION}）…` })
     let found
     try {
-      found = await findEasyTier([], { onLog: line => warn(`dsbot-nodes: ${line}`) })
+      found = await findEasyTier([], {
+        onLog: line => {
+          // 下载器每吐一行就更新一次状态：界面轮询时能看到「已下载 12.3 MB」，
+          // 而不是干等。第一行一般就是「没找到 EasyTier，开始下载…」。
+          setEasytier({ state: 'downloading', message: line })
+          warn(`dsbot-nodes: ${line}`)
+        },
+      })
     } catch (error) {
-      virtual = { ...virtual, error: `EasyTier 下载失败：${error?.message ?? error}` }
-      warn(`dsbot-nodes: ${virtual.error} —— 跨网连不上，同局域网照常用`)
+      const message = `EasyTier 下载失败：${error?.message ?? error}`
+      setEasytier({ state: 'error', message })
+      virtual = { ...virtual, error: message }
+      warn(`dsbot-nodes: ${message} —— 跨网连不上，同局域网照常用`)
       return
     }
     if (found === undefined) {
-      virtual = { ...virtual, error: '没找到 EasyTier，自动下载也没成功' }
-      warn(`dsbot-nodes: ${virtual.error} —— 跨网连不上，同局域网照常用`)
+      const message = '没找到 EasyTier，自动下载也没成功'
+      setEasytier({ state: 'missing', message })
+      virtual = { ...virtual, error: message }
+      warn(`dsbot-nodes: ${message} —— 跨网连不上，同局域网照常用`)
       return
     }
+    setEasytier({ state: 'ready', core: found.core ?? null, message: `EasyTier 就绪（${found.source ?? 'local'}）` })
 
     // 零权限模式（默认走这条）：不建虚拟网卡，所以不需要管理员权限。
     // 主机把自己所在的局域网"借"给虚拟网（子网代理），远端连那个地址就行。
@@ -333,6 +360,8 @@ export function createHosting({
           : (!(virtual.on || hasLocalIp(virtual.ipv4 ?? hostVirtualIp(current?.code ?? '').split('/')[0]))
             && !/没找到 EasyTier/.test(virtual.error ?? '')),
       },
+      // 跨网组件自己的状态：界面据此显示「正在下载 / 没找到 / 重试」。
+      easytier: { ...easytier },
       // 已经在这个端口上的是哪台机器（给界面直接看）
       online: store.list().filter(node => node.status === 'online').map(node => ({
         id: node.id, name: node.name, botName: node.botName ?? '',

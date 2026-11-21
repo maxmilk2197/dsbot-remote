@@ -1260,6 +1260,11 @@ function registerRoutes(rt, api, hosting) {
         // 一个错误弹层，而真正该做的事（右键跑脚本）反而没告诉他。
         return sendJson(res, 200, result)
       }
+      // 跨网组件没准备好时，界面上的「下载 / 重试」走这里：重新找一遍，
+      // 缺就下（带进度写进 status.easytier），下好了顺手把虚拟网起起来。
+      if (req.method === 'POST' && path === '/api/nodes/network') {
+        return sendJson(res, 200, { ok: true, ...(await hosting.enableNetwork()) })
+      }
       if (req.method === 'GET' && path === '/api/nodes/groups') {
         return sendJson(res, 200, { ok: true, groups: listGroups(rt) })
       }

@@ -1,6 +1,6 @@
 {
   "name": "dsbot-remote",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Remote Bot for DS Bot: another computer's Bot joins the group chat, pushes its own files, runs its own commands. 粘 https://github.com/maxmilk2197/dsbot-remote 就能装。 （AI 生成，请勿用于生产环境 / AI-generated, not for production use）",
   "workspaces": [

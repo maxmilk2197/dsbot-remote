@@ -613,6 +613,11 @@
 
       const code = state?.code
       const net = state?.network
+      const et = state?.easytier
+      // 组件没准备好时才占一块版面：正在找 / 正在下 / 失败了。
+      // 已经就绪、或者跨网本来就连上了，就别拿它打扰人。
+      const etBusy = et !== undefined && (et.state === 'checking' || et.state === 'downloading')
+      const etTrouble = et !== undefined && (et.state === 'missing' || et.state === 'error')
       const nodes = state?.nodes || []
       const join = state?.join
 
@@ -664,6 +669,28 @@
               note('跑起来之后这一行会自己变成绿色，不用刷新。'),
             ]),
         ]),
+
+        // EasyTier 是跨网那一半的组件。以前它要么悄悄下、要么悄悄失败，
+        // 界面只剩一句「正在进虚拟网…」—— 用户没法知道该等还是该点。
+        etBusy || etTrouble
+          ? card([
+            label('EasyTier（跨网用的组件）'),
+            note(etBusy
+              ? (et.message || '正在下载 EasyTier（约 30MB，只下一次）…')
+              : `跨网组件没准备好：${et.message || '没找到'}`),
+            note(`版本 ${et.version} · 装到 ${et.dir}`),
+            etBusy
+              ? note('下完会自己接着进虚拟网，不用守着这页。')
+              : row([
+                Button({
+                  variant: 'primary',
+                  children: busy === 'network' ? '正在重试…' : '下载 / 重试',
+                  onClick: () => act('network', () => jpost('/network')),
+                }),
+                note('只影响跨网；同一个 WiFi 下照常输码直连'),
+              ]),
+          ])
+          : null,
 
         card([
           label('加入别人的群'),

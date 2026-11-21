@@ -28,6 +28,14 @@ test('ChatBox 用 h(ChatBox, {...}) 渲染', () => {
   assert.match(source, /h\(ChatBox, \{ join, act \}\)/)
 })
 
+// 缺 EasyTier 时得给一个「下载 / 重试」，不能只留一句静态的「正在进虚拟网…」。
+test('EasyTier 没准备好时给出下载 / 重试入口', () => {
+  assert.match(source, /const et = state\?\.easytier/)
+  assert.match(source, /etBusy \|\| etTrouble/)
+  assert.match(source, /jpost\('\/network'\)/)
+  assert.match(source, /EasyTier（跨网用的组件）/)
+})
+
 // 「进哪个群？用哪个文件夹？」只对一条连接自动弹一次。
 // 以前每次进设置页 Panel 重新挂载、autoOpened 归零，就又弹一遍 —— 这里把
 // 「按连接认一次 + 记住已弹过」两件事钉在源码上。

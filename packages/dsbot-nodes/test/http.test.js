@@ -92,6 +92,25 @@ test('状态口在真 HTTP 上能读', async () => {
   })
 })
 
+// 跨网组件缺没缺，界面得知道 —— 以前只能看日志，页面永远停在「正在进虚拟网…」。
+test('状态里带 EasyTier 组件的现状', async () => {
+  await withRoutes(async ({ base }) => {
+    const body = await fetch(base + '/api/nodes/status').then(r => r.json())
+    assert.equal(typeof body.easytier, 'object')
+    assert.ok(['unknown', 'checking', 'downloading', 'ready', 'missing', 'error'].includes(body.easytier.state))
+    assert.equal(typeof body.easytier.dir, 'string')
+    assert.equal(typeof body.easytier.version, 'string')
+  })
+})
+
+test('「下载 / 重试」打的那个口通着', async () => {
+  await withRoutes(async ({ base }) => {
+    const result = await json(base, '/api/nodes/network', {})
+    assert.equal(result.status, 200)
+    assert.equal(typeof result.body, 'object')
+  })
+})
+
 test('外站 Origin 被挡：本机页面才准改设置', async () => {
   await withRoutes(async ({ base }) => {
     const response = await fetch(base + '/api/nodes/status', { headers: { origin: 'https://evil.example' } })
