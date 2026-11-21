@@ -37,7 +37,18 @@ https://github.com/maxmilk2197/dsbot-remote
 `files` 里只打包 `packages/dsbot-nodes` 和根上的 `cordis.patch.yml`（tar 包约 166 KB），
 所以装出来就是一个完整插件，不用再拼 `#path:`。
 
-- 这是 **git 依赖**：那台机器上得有 `git`，装之前先跑
+- **那台机器没装 git**：别用上面这条（pnpm 解析 git 说明符必须开子进程跑
+  `git ls-remote`，没有 git 直接 `ERR_PNPM_GIT_RESOLVE_FAILED`）。改成粘打好的 tgz 链接，
+  一样是「输入框里贴一行」：
+
+  ```
+  https://raw.githubusercontent.com/maxmilk2197/dsbot-remote/main/dist/dsbot-remote-0.1.0.tgz
+  ```
+
+  大陆网络 raw 不通时换 CDN 镜像：
+  `https://cdn.jsdelivr.net/gh/maxmilk2197/dsbot-remote@main/dist/dsbot-remote-0.1.0.tgz`。
+  两条都实测过：`pnpm add` 2 秒装完，入口、`dsh.bundle.patch` 都在。
+- 上面那条 git 地址要求机器上有 `git`，装之前先跑
   `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。
 - 没有 git 的机器，两条替代路：
   1. 拿打包好的 tgz（`pnpm pack` 出来的 `dsbot-remote-*.tgz` 或仓库里给的），输入框里填它的绝对路径，例如 `C:\Users\me\Downloads\dsbot-remote-0.1.0.tgz`；
