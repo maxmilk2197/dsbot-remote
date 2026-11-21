@@ -445,9 +445,19 @@ export async function connectTcp({ url, token, timeoutMs = 5000, idleMs = IDLE_M
   const nodeNonce = randomBytes(16).toString('base64')
 
   let challengeSeen = false
+  // 我们自己主动关的连接：关之前已经 reject 过更具体的理由，别让下面的
+  // close 监听把话术盖成一句含糊的"连接断了"。
+  let intentional = false
   const ack = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new BadFrame('握手超时：对面没有回 hello.ack')), timeoutMs)
     timer.unref?.()
+    // 对面把我们拉黑（小黑屋直接 destroy）或中途挂了：不等满 timeout 才报，
+    // 而且要报得像回事。重复 reject 是空操作，所以这里不用成对拆监听。
+    peer.once('close', () => {
+      if (intentional) return
+      clearTimeout(timer)
+      reject(new BadFrame('对面把连接断了（口令不对被拉黑，或对面没起来）'))
+    })
     peer.gate = (frame) => {
       if (frame?.t === 'hello.error') {
         clearTimeout(timer)
@@ -478,6 +488,7 @@ export async function connectTcp({ url, token, timeoutMs = 5000, idleMs = IDLE_M
         // 局域网里随便哪个设备回一句 pair.ok 也骗不过这一步。
         if (!proofMatches(key, 'host', frame.proof)) {
           clearTimeout(timer)
+          intentional = true
           try { peer.send({ t: 'hello.error', code: 'node/unauthorized', message: '对面证明不了自己知道配对码' }) } catch {}
           peer.close()
           reject(new BadFrame('对面证明不了自己知道配对码：可能不是主机'))
@@ -497,8 +508,15 @@ export async function connectTcp({ url, token, timeoutMs = 5000, idleMs = IDLE_M
     }
   })
 
-  peer.send({ t: 'hello', proto: HANDSHAKE_PROTO, nonce: nodeNonce, pub: publicB64 })
-  await ack
+  try {
+    peer.send({ t: 'hello', proto: HANDSHAKE_PROTO, nonce: nodeNonce, pub: publicB64 })
+    await ack
+  } catch (error) {
+    // 握手没成：socket 不关会一直挂到 idleMs（60 秒）。换地址重试几次就是一把
+    // 死连接，而它们还占着对端的握手状态。
+    try { peer.close() } catch {}
+    throw error
+  }
   peer.gate = null
   return peer
 }

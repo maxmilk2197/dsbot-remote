@@ -159,7 +159,7 @@ function installOnce(rt) {
         reject(new LlmError(`${method} 超过 ${timeoutMs}ms 没有回答`, 'node/timeout'))
       }, timeoutMs)
       timer.unref?.()
-      waiters.set(id, { resolve, reject, timer })
+      waiters.set(id, { resolve, reject, timer, nodeId })
       try {
         sendFrame(nodeId, { id, method, params })
       } catch (error) {
@@ -326,16 +326,32 @@ function installOnce(rt) {
 
         // 同一个节点重连：旧连接必须断掉。留着它，两边的帧都会进来，
         // 而回包按 peers.get 走新连接 —— 旧连接上的请求永远等不到回音。
+        //
+        // 顺序要紧：先把新连接放进 map，再关旧的。旧连接的 close 会走下面
+        // drop()，守卫是「map 里不是我就返回」；反过来的话，关旧连接那一刻
+        // map 里还是旧连接，drop 会把刚上线的新连接记成 offline —— 设置页
+        // 显示"离线"、工作区那一行跟着消失，而节点其实好好的。
         const previous = peers.get(nodeId)
+        peers.set(nodeId, peer)
         if (previous !== undefined && previous !== peer) {
           warn('dsbot-nodes: %s 换了一条新连接，旧的断开', nodeId)
+          // 旧连接上还挂着的轮次不会再有 turn.result 了：明说一句掉线，
+          // 让 adapter 当场收尾，而不是等 30 分钟的死线。
+          emit(nodeId, 'node.offline', { nodeId, reason: 'reconnected' })
           try { previous.close() } catch {}
         }
-        peers.set(nodeId, peer)
         peer.lastFrameAt = Date.now()
         const drop = () => {
           if (peers.get(nodeId) !== peer) return
           peers.delete(nodeId)
+          // 这条连接上还在等回音的请求不会再有回答了：当场拒掉。否则界面要
+          // 干等 60 秒（CALL_TIMEOUT_MS）才收到一句"超时"，看着像卡死。
+          for (const [id, waiter] of waiters) {
+            if (waiter.nodeId !== nodeId) continue
+            clearTimeout(waiter.timer)
+            waiters.delete(id)
+            waiter.reject(new LlmError('远程节点 ' + nodeId + ' 掉线了', 'node/offline'))
+          }
           // 写盘失败不能变成 unhandledRejection：断线时目录可能已经被删了。
           store.update(nodeId, { status: 'offline', lastSeenAt: Date.now() })
             .catch(error => warn('dsbot-nodes: marking %s offline failed: %s', nodeId, error))

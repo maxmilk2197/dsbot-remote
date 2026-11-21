@@ -296,3 +296,42 @@ test('⑫ 名字：报上来的是 IP 就用电脑名顶掉，群里的成员也
     assert.equal(bot.name, hostname(), '群里那个成员也该叫电脑名')
   }, { name: '127.0.0.1' })
 })
+
+test('⑬ 同一台机器重连：记录要留在"在线"，旧连接要断掉', async () => {
+  await withPair(async ({ api, peer, hosted, workspace }) => {
+    assert.equal(api.list()[0].status, 'online')
+    const second = await connectTcp({ url: `tcp://127.0.0.1:${hosted.port}`, token: hosted.code })
+    try {
+      servePeer(second, {
+        name: '手机',
+        deviceId: 'dev-ops-1',
+        cwd: workspace,
+        inbox: false,
+        agent: { command: 'node', args: ['-e', '1'] },
+      })
+      // 旧连接会被主机主动断掉 —— 这是"重连被认出来"的判据。
+      await until(() => peer.closed === true)
+      await wait(300)
+      assert.equal(api.list().length, 1, '同一台机器不该多出一条记录')
+      assert.equal(api.list()[0].status, 'online', '重连之后不能把新连接记成离线')
+    } finally {
+      try { second.close() } catch {}
+    }
+  })
+})
+
+test('⑭ 节点中途掉线：在途的调用当场失败，不干等 60 秒', async () => {
+  await withPair(async ({ api, node, peer }) => {
+    const started = Date.now()
+    const pending = api.call(node.id, 'node.exec', {
+      execId: 'slow-1',
+      action: 'run_shell',
+      args: { command: 'node -e "setTimeout(() => {}, 1500)"' },
+    })
+    pending.catch(() => {})
+    await wait(300)
+    peer.close()
+    await assert.rejects(pending, error => /掉线|offline/.test(String(error.message ?? '') + String(error.code ?? '')))
+    assert.ok(Date.now() - started < 5_000, '不该等到 60 秒的调用超时')
+  })
+})

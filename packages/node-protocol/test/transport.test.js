@@ -181,6 +181,21 @@ test('装上密钥之后，线路上抓不到明文（AES-256-GCM）', async () 
   }
 })
 
+test('对面直接断线（拉黑 / 没起来）：握手立刻报错，不等 5 秒超时', async () => {
+  const server = net.createServer(socket => socket.destroy())
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  const started = Date.now()
+  try {
+    await assert.rejects(
+      connectTcp({ url: `tcp://127.0.0.1:${server.address().port}`, token: 'ABCDEFGH', timeoutMs: 5_000 }),
+      error => /断了|口令|拒绝/.test(String(error.message ?? '')),
+    )
+    assert.ok(Date.now() - started < 2_000, '不该等满 timeoutMs 才报')
+  } finally {
+    server.close()
+  }
+})
+
 test('单帧超限：send 回 false 而不抛（抛出去就是宿主的 fatal）', async () => {
   const server = net.createServer(() => {})
   await new Promise(done => server.listen(0, '127.0.0.1', done))
