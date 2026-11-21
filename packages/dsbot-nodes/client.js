@@ -58,6 +58,12 @@ window.__ModuleLoader__.load({
 
     const API = '/api/nodes'
 
+    // 自动弹「进哪个群？用哪个文件夹？」那一框：一条连接只弹一次。
+    // AUTO_OPEN_KEY 存的是已经问过的那条连接的 join.since；autoOpenedFor 是本次
+    // 页面里的同一份记忆 —— 存储被禁时由它兜住「同一次连接反复弹」。
+    const AUTO_OPEN_KEY = 'dsbot-nodes:join-auto-opened'
+    let autoOpenedFor = null
+
     const asJson = async (res) => {
       if (res.ok) return res.json()
       // 失败时后端会带一句人能看懂的原因（比如"你在 UAC 窗口点了「否」"），
@@ -515,7 +521,8 @@ window.__ModuleLoader__.load({
       const [joinAgent, setJoinAgent] = React.useState('')
       const [elevateScript, setElevateScript] = React.useState('')
       const [dialog, setDialog] = React.useState(false)
-      const [autoOpened, setAutoOpened] = React.useState(false)
+      // 已经为哪条连接自动弹过框（存 join.since）—— 换了连接才会再弹。
+      const [askedFor, setAskedFor] = React.useState('')
 
       const refresh = React.useCallback(async () => {
         try {
@@ -533,16 +540,39 @@ window.__ModuleLoader__.load({
       usePoll(refresh, 4000)
 
       // 连上的那一刻，把"选群组 + 选文件夹"这一框自动弹出来 —— 连接时该问的
-      // 就那两件事。只自动弹一次，别每次轮询都盖上来。
+      // 就那两件事。只对这一次连接弹一次，别每次轮询、每次进设置页都盖上来。
       // 一个群都没授权时也弹：框里会写清楚"去主机那边授权"，比什么都不说好。
       React.useEffect(() => {
         const join = state?.join
-        if (autoOpened) return
-        if (join?.running === true) {
-          setDialog(true)
-          setAutoOpened(true)
+        if (join?.running !== true) return
+        // join.since 是这次连上的时间戳：同一条连接不变，重连会换一个。
+        const stamp = String(join.since ?? join.host ?? '') || '*'
+        if (askedFor === stamp) return
+        // 已经进过群了，就没什么非问不可的：想改还有「选群组和文件夹」那个按钮。
+        if ((join.groups ?? []).length > 0) {
+          setAskedFor(stamp)
+          return
         }
-      }, [state, autoOpened])
+        let seen = ''
+        try {
+          seen = String(window.localStorage.getItem(AUTO_OPEN_KEY) ?? '')
+        } catch (error) {
+          // 隐私模式下读存储会抛：不影响这一次弹，只是刷新页面后可能再弹。
+          seen = ''
+        }
+        if (autoOpenedFor === stamp || seen === stamp) {
+          setAskedFor(stamp)
+          return
+        }
+        autoOpenedFor = stamp
+        try {
+          window.localStorage.setItem(AUTO_OPEN_KEY, stamp)
+        } catch (error) {
+          // 同上：存不了就只记在本次页面里。
+        }
+        setAskedFor(stamp)
+        setDialog(true)
+      }, [state, askedFor])
 
       const act = async (name, fn, done) => {
         setBusy(name)

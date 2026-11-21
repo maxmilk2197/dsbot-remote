@@ -27,3 +27,19 @@ test('组件只通过 h() 渲染，不能当普通函数直接调用', () => {
 test('ChatBox 用 h(ChatBox, {...}) 渲染', () => {
   assert.match(source, /h\(ChatBox, \{ join, act \}\)/)
 })
+
+// 「进哪个群？用哪个文件夹？」只对一条连接自动弹一次。
+// 以前每次进设置页 Panel 重新挂载、autoOpened 归零，就又弹一遍 —— 这里把
+// 「按连接认一次 + 记住已弹过」两件事钉在源码上。
+test('自动弹框按连接记一次，不会每次进设置页都弹出', () => {
+  assert.match(source, /const AUTO_OPEN_KEY = 'dsbot-nodes:join-auto-opened'/)
+  assert.match(source, /let autoOpenedFor = null/)
+  assert.match(source, /const stamp = String\(join\.since/)
+  assert.match(source, /autoOpenedFor === stamp \|\| seen === stamp/)
+  // 已经进过群的机器不再自动弹（想改还有按钮）
+  assert.match(source, /if \(\(join\.groups \?\? \[\]\)\.length > 0\)/)
+  assert.match(source, /localStorage\.getItem\(AUTO_OPEN_KEY\)/)
+  assert.match(source, /localStorage\.setItem\(AUTO_OPEN_KEY, stamp\)/)
+  // 只认 running 就弹的旧写法不能再回来
+  assert.doesNotMatch(source, /if \(join\?\.running === true\) \{\s*\n\s*setDialog\(true\)/)
+})
