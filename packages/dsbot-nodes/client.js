@@ -665,6 +665,8 @@
       const etTrouble = et !== undefined && (et.state === 'missing' || et.state === 'error')
       const nodes = state?.nodes || []
       const join = state?.join
+      // 群里留着指向已删节点的 Bot：点它只会报"没有 adapter"，清理要一次点一颗。
+      const strays = state?.strays || []
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 } },
         // 页面标题由设置壳子统一渲染，这里不再重复一遍「远程节点」。
@@ -808,6 +810,22 @@
             act,
             onRename: (id, name) => act('rename', () => jpost('/rename', { node: id, name })),
           })))),
+
+        strays.length === 0
+          ? null
+          : card([
+            label('群里的旧成员'),
+            note('这些 Bot 指着一台已经不存在的机器（节点记录被删，或者换了台机器）。在群里点它们只会报错。清掉就是把它们移出群、删掉 Bot。'),
+            stack(strays.map(stray => row([
+              note(`${stray.name || stray.botId} · 在「${stray.group?.name ?? stray.group?.id ?? ''}」· 节点 ${stray.nodeId}`),
+              h('div', { style: { marginLeft: 'auto' } },
+                Button({
+                  children: busy === 'stray:' + stray.botId ? '清理中…' : '移出群',
+                  onClick: () => act('stray:' + stray.botId, () => jpost('/strays', { botId: stray.botId })),
+                }),
+              ),
+            ]))),
+          ]),
 
         h(JoinDialog, {
           open: dialog && join?.running === true,

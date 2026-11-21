@@ -132,7 +132,7 @@ export const METHODS = Object.freeze({
     summary: '一轮的终态：ok / error / cancelled，附带产物文件',
     params: {
       required: { turnId: 'string', status: { type: 'string', enum: ['ok', 'error', 'cancelled'] } },
-      optional: { text: 'string', files: 'array', usage: 'object', error: 'string' },
+      optional: { text: 'string', files: 'array', usage: 'object', error: 'string', message: 'string' },
     },
     result: { required: { ok: 'boolean' }, optional: {} },
   },

@@ -58,7 +58,11 @@ https://github.com/maxmilk2197/dsbot-remote
   去 `__ModuleLoader__` 里找模块，找不到就整机卡在
   `web boot: 1 entry did not activate / <包名>: import failed`。所以 `client.js` 里
   两个名字都注册了（`dsbot-nodes`、`dsbot-remote`），再改包名记得同步那里。
+- **装完设置里没有「远程节点」**：插件管理器只写了依赖，没把它加进
+  `~/.dsh/profiles/<profile>/package.json` 的 `dsh.profile.bundles`（宿主侧的缺口）。
+  手工把包装名追加到那个数组末尾，秒生效，不用重装。
 - 装完还要 ds-bot 那一行补丁，见 [FORK.md](FORK.md)；升级 ds-bot 会把它冲掉。
+  现在插件启动时会自己补（日志里有「自补：已在位 / 已写上」），补完要重启一次 DSH。
 
 ## 三步用起来
 

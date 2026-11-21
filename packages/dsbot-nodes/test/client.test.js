@@ -68,6 +68,13 @@ test('等不到 bot 服务时，设置页显示原因和「立即挂载」', () 
   assert.match(source, /state\?\.pending \? null : card\(\[/)
 })
 
+// 群里留着指向已删节点的 Bot：界面要能一键移出群，而不是让用户去成员表里翻。
+test('群里的孤儿 Bot 有「移出群」入口', () => {
+  assert.match(source, /const strays = state?.strays || []/)
+  assert.match(source, /label\('群里的旧成员'\)/)
+  assert.match(source, /jpost\('\/strays', \{ botId: stray\.botId \}\)/)
+})
+
 // 选主文件夹要用宿主自带的对话框（Windows 上是系统文件夹选择，能翻别的盘）。
 // 自制列表只能当兜底：宿主没有 uiWorkspace、或者它抛错时才出现。
 test('浏览器选文件夹优先用宿主的目录选择器', () => {

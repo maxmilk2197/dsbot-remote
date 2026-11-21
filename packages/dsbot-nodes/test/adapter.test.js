@@ -184,6 +184,34 @@ test('失败的一轮：文本块被关掉，抛 LlmError 且带 NODE_TURN_FAILE
   assert.equal(chunks.at(-1).type, 'block-end')
 })
 
+test('节点只发 message（不发 error）时，群里看到的仍是那句原话', async () => {
+  const link = fakeLink({
+    start: (params, self) => {
+      self.emit('turn.result', { turnId: params.turnId, status: 'error', message: '这台没配 agent，跑不了 turn' })
+    },
+  })
+  await assert.rejects(async () => {
+    for await (const chunk of makeAdapter(link).stream(turnOptions())) void chunk
+  }, (error) => {
+    assert.equal(error.code, 'NODE_TURN_FAILED')
+    assert.match(error.message, /没配 agent/)
+    return true
+  })
+})
+
+test('群里的 Bot 指着已经删掉的节点：给一句人话，不发请求', async () => {
+  const link = fakeLink({ start: () => { throw new Error('不该真的发出去') } })
+  const adapter = makeAdapter(link, { nodes: () => ({}) })
+  await assert.rejects(async () => {
+    for await (const chunk of adapter.stream(turnOptions())) void chunk
+  }, (error) => {
+    assert.equal(error.code, 'NODE_GONE')
+    assert.match(error.message, /不在「远程节点」列表/)
+    return true
+  })
+  assert.equal(link.sent.length, 0)
+})
+
 test('取消：发 turn.cancel，以 finish(aborted) 收尾，不抛', async () => {
   const link = fakeLink({
     start: (params, self) => {

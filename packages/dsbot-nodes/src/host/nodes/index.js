@@ -654,8 +654,28 @@ ${links.join(' ')}`
   })
 
   let registration
-  const syncRoutes = () => {
-    const routes = store.list().map(node => routeOf(node.id))
+  // 群里还站着 node:<id> 的 Bot、节点记录却已经不在了（被删掉、nodes.json 丢过、
+  // 换了台机器）：把这条路也注册上，调用才会落进 adapter 里给一句人话。否则宿主
+  // 先丢一句 "no adapter registered for provider node:xxxx"，用户只能看到这个。
+  const orphanRoutes = new Set()
+  let routeCount = 0
+  const noteOrphanRoutes = () => {
+    for (const room of Object.values(rt.state?.rooms ?? {})) {
+      for (const memberId of room?.members ?? []) {
+        const bot = rt.botOf?.(memberId) ?? rt.state?.bots?.[memberId]
+        const id = nodeIdOf(String(bot?.model ?? ''))
+        if (id === undefined || store.node(id) !== undefined) continue
+        if (orphanRoutes.has(id)) continue
+        orphanRoutes.add(id)
+        bootNote(`install: 群里的 Bot「${bot?.name ?? memberId}」指着已经不存在的节点 ${id}，路由先留着，点它会说明怎么处理`)
+      }
+    }
+  }
+  const syncRoutes = (loaded = false) => {
+    // store 是懒加载的：读盘之前 list() 是空的，那时扫群只会把每台机器都当成孤儿。
+    if (loaded) noteOrphanRoutes()
+    const routes = [...new Set([...store.list().map(node => routeOf(node.id)), ...[...orphanRoutes].map(routeOf)])]
+    routeCount = routes.length
     // 一条路由都没有时不去注册：宿主会以 INVALID_ADAPTER 拒掉空列表。
     if (routes.length === 0 && registration === undefined) return
     try {
@@ -673,8 +693,8 @@ ${links.join(' ')}`
   // ds-bot 转头就让 Bot 说"default 已经不可用了"。
   void store.load()
     .then(() => {
-      syncRoutes()
-      bootNote(`install: 节点记录 ${store.list().length} 条，LLM 路由 ${store.list().length} 条`)
+      syncRoutes(true)
+      bootNote(`install: 节点记录 ${store.list().length} 条，LLM 路由 ${routeCount} 条${orphanRoutes.size > 0 ? `（其中 ${orphanRoutes.size} 条是群里留着、记录已不在的兜底）` : ''}`)
     })
     .catch(error => warn('dsbot-nodes: 读节点记录失败：%s', error?.message ?? error))
 
@@ -1152,6 +1172,28 @@ function registerRoutes(rt, api, hosting) {
       if (req.method === 'GET' && path === '/api/nodes/guard') {
         return sendJson(res, 200, { ok: true, ...guardStats() })
       }
+      // 群里站着指向"已经不存在的节点"的 Bot：节点记录删了、nodes.json 丢过、
+      // 或者换了台机器。它们还能被 @，回话却只有一句 "no adapter registered for
+      // provider node:xxxx"。列出来给界面一键清理，但不自动删 —— 删群成员不可逆。
+      const straysOf = () => {
+        // 路由 handler 是独立函数，闭包里没有 installOnce 的 store：走 api.store。
+        const known = new Set((api.store?.list?.() ?? []).map(node => node.id))
+        const out = []
+        for (const room of Object.values(rt.state?.rooms ?? {})) {
+          for (const memberId of room?.members ?? []) {
+            const bot = rt.botOf?.(memberId) ?? rt.state?.bots?.[memberId]
+            const id = nodeIdOf(String(bot?.model ?? ''))
+            if (id === undefined || known.has(id)) continue
+            out.push({
+              botId: memberId,
+              name: String(bot?.name ?? ''),
+              nodeId: id,
+              group: { id: room.id, name: room.name ?? room.id },
+            })
+          }
+        }
+        return out
+      }
       if (req.method === 'GET' && path === '/api/nodes/status') {
         const state = redactCode({ ...hosting.status() }, url.searchParams.get('reveal') === '1')
         return sendJson(res, 200, {
@@ -1180,7 +1222,28 @@ function registerRoutes(rt, api, hosting) {
           // 的失败点。之前它单独走 /groups，那个口一出问题下拉就是空的。
           groups: listGroups(rt),
           join: api.joinStatus(),
+          strays: straysOf(),
         })
+      }
+      // 清掉一个孤儿成员：移出它所在的群，再删掉那个 Bot。
+      if (req.method === 'POST' && path === '/api/nodes/strays') {
+        const body = await readBody(req)
+        const botId = String(body.botId ?? '').trim()
+        if (botId === '') return sendJson(res, 400, { ok: false, error: '要清哪个？' })
+        const target = straysOf().find(each => each.botId === botId)
+        if (target === undefined) return sendJson(res, 200, { ok: true, cleared: false })
+        try {
+          await rt.updateRoom?.(target.group.id, { remove: [botId] })
+        } catch (error) {
+          warn('dsbot-nodes: 把 %s 移出 %s 失败：%s', botId, target.group.id, error?.message ?? error)
+        }
+        try {
+          await rt.deleteBot?.(botId)
+        } catch (error) {
+          warn('dsbot-nodes: 删掉孤儿 Bot %s 失败：%s', botId, error?.message ?? error)
+        }
+        bootNote(`清掉孤儿成员 ${target.name || botId}（节点 ${target.nodeId}，群「${target.group.name}」）`)
+        return sendJson(res, 200, { ok: true, cleared: true })
       }
       if (req.method === 'POST' && path === '/api/nodes/rename') {
         const body = await readBody(req)

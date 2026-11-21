@@ -90,6 +90,8 @@ test('状态口在真 HTTP 上能读', async () => {
     const plain = await fetch(base + '/api/nodes/status').then(async r => ({ status: r.status, body: await r.json() }))
     assert.equal(plain.status, 200)
     assert.equal(plain.body.ok, true)
+    // 孤儿成员那张表永远在：界面靠它给"移出群"的按钮，缺字段等于那张卡永远不出现。
+    assert.ok(Array.isArray(plain.body.strays))
   })
 })
 
@@ -101,6 +103,14 @@ test('状态里带 EasyTier 组件的现状', async () => {
     assert.ok(['unknown', 'checking', 'downloading', 'ready', 'missing', 'error'].includes(body.easytier.state))
     assert.equal(typeof body.easytier.dir, 'string')
     assert.equal(typeof body.easytier.version, 'string')
+  })
+})
+
+test('清孤儿成员：没给 botId 就明确拒绝，不会去动群', async () => {
+  await withRoutes(async ({ base }) => {
+    const result = await json(base, '/api/nodes/strays', {})
+    assert.equal(result.status, 400)
+    assert.match(String(result.body.error), /哪个/)
   })
 })
 

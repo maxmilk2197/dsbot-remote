@@ -438,6 +438,9 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
       if (files.length > 0) say(`带走 ${files.length} 个文件：${files.map(f => f.name).join('、')}`)
       // 协议里的枚举是 ok / error / cancelled，没有 'failed'。
       const status = result.ok ? 'ok' : result.aborted ? 'cancelled' : 'error'
+      // message 是给人看的原话；error 是老主机认的字段。两个都带，
+      // 免得升级不同步时群里只剩一句“节点报告本轮失败（error）”。
+      const failure = typeof result.message === 'string' && result.message !== '' ? { error: result.message } : {}
       const sent = peer.send({
         method: 'turn.result',
         params: {
@@ -445,6 +448,7 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
           status,
           text: result.text,
           message: result.message,
+          ...failure,
           ...(files.length > 0 ? { files } : {}),
         },
       })
@@ -459,6 +463,7 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
             status,
             text: `${result.text ?? ''}\n（${files.length} 个附件太大，没发出去）`,
             message: result.message,
+            ...failure,
           },
         })
       }

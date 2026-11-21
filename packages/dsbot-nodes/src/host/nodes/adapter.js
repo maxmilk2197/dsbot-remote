@@ -193,6 +193,13 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
       const nodeId = nodeIdOf(route)
       if (nodeId === undefined) throw new LlmError(`not a remote node route: ${route}`, 'NO_ADAPTER')
       if (options.sessionId === undefined) throw new LlmError('a remote node request needs a session', 'INVALID_REQUEST')
+      // 群成员里还站着这台机器的 Bot，但节点记录已经没了（被删掉、nodes.json 丢过、
+      // 或者换了台机器）。宿主原本会先说一句“no adapter registered for provider
+      // node:xxxx”，用户完全看不懂；路由由 index.js 兜底留着，这里给人话。
+      await this.deps.ready?.()
+      if (this.deps.nodes?.()[nodeId] === undefined) {
+        throw new LlmError(`这台机器（${nodeId}）已经不在「远程节点」列表里了：记录被删掉，或者它换了一台机器。去设置里的「远程节点」重新配对；用不上就把它从群里移出去。`, 'NODE_GONE')
+      }
 
       const turnId = randomUUID()
       const mailbox = new TurnMailbox()
@@ -317,7 +324,9 @@ export function createAdapterClass({ LlmAdapter, LlmError }) {
             const result = item.result
             if (result.status !== 'ok') {
               yield* closeText()
-              const message = result.error ?? `节点报告本轮失败（${result.status}）`
+              // 节点发的是 message，早期的主机只认 error —— 两个都读，
+              // 否则群里永远只有一句“节点报告本轮失败（error）”，原因全丢了。
+              const message = result.error ?? result.message ?? `节点报告本轮失败（${result.status}）`
               throw new LlmError(message, result.status === 'cancelled' ? 'NODE_CANCELLED' : 'NODE_TURN_FAILED')
             }
             // A node that answered in one piece instead of streaming still has
