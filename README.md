@@ -60,7 +60,24 @@ https://github.com/maxmilk2197/dsbot-remote
   两个名字都注册了（`dsbot-nodes`、`dsbot-remote`），再改包名记得同步那里。
 - **装完设置里没有「远程节点」**：插件管理器只写了依赖，没把它加进
   `~/.dsh/profiles/<profile>/package.json` 的 `dsh.profile.bundles`（宿主侧的缺口）。
-  手工把包装名追加到那个数组末尾，秒生效，不用重装。
+  手工把包装名追加到那个数组末尾，秒生效，不用重装。PowerShell 一条：
+
+  ```powershell
+  $prof = Join-Path $env:USERPROFILE '.dsh\profiles\desktop'
+  $pkg  = Join-Path $prof 'package.json'
+  $p = Get-ChildItem (Join-Path $prof 'node_modules') -Directory |
+    Where-Object { $_.Name -in @('dsbot-remote','dsbot-nodes') } | Select-Object -First 1
+  if (-not $p) { '没找到已安装的插件：先 pnpm add <tgz 路径>' } else {
+    $j = Get-Content $pkg -Raw | ConvertFrom-Json
+    $b = @($j.dsh.profile.bundles)
+    if ($b -contains $p.Name) { "$($p.Name) 已在 bundles 里" } else {
+      $j.dsh.profile.bundles = @($b + $p.Name)
+      $json = $j | ConvertTo-Json -Depth 40
+      [IO.File]::WriteAllText($pkg, $json, (New-Object System.Text.UTF8Encoding($false)))
+      "已把 $($p.Name) 加进 bundles —— 完全退出 DSH 再打开"
+    }
+  }
+  ```
 - 装完还要 ds-bot 那一行补丁，见 [FORK.md](FORK.md)；升级 ds-bot 会把它冲掉。
   现在插件启动时会自己补（日志里有「自补：已在位 / 已写上」），补完要重启一次 DSH。
 
