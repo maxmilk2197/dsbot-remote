@@ -638,7 +638,24 @@
 
         error === '' ? null : note(error),
 
-        card([
+        // 路由还没挂上时页面只剩一句 HTTP 404。这里给原因，并留一个"再催一次"的入口：
+        // 不必为了重试重启整个 DSH。
+        state?.pending
+          ? card([
+            label('设置页还没挂上'),
+            note(state.reason || '插件在等 bot 服务，还没走到挂载那一步。'),
+            row([
+              Button({
+                variant: 'primary',
+                children: busy === 'mount' ? '正在挂载…' : '立即挂载',
+                onClick: () => act('mount', () => jpost('/mount')),
+              }),
+              note('只是再催一次；日志里说缺补丁，就得先补那一行'),
+            ]),
+          ])
+          : null,
+
+        state?.pending ? null : card([
           label('配对码'),
           row([
             h('div', {

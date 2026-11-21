@@ -1033,7 +1033,7 @@ const ROUTE_KEY = Symbol.for('dsbot-nodes.routes/v1')
 
 function routeState() {
   if (globalThis[ROUTE_KEY] === undefined) {
-    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null, server: null }
+    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null, server: null, early: null }
   }
   return globalThis[ROUTE_KEY]
 }
@@ -1325,6 +1325,11 @@ function registerRoutes(rt, api, hosting) {
     // 换了 server（DSH 重启了 web 服务、端口变了）就必须重挂 —— 旧路由跟着旧 server
     // 一起走了，只剩一个 mounted=true 的错觉，设置页从此永远 404。
     if (routes.mounted && routes.server === server) return
+    // 早期那个"还没挂载"的占位路由得先让位，否则同一个前缀会撞 duplicate。
+    if (routes.early?.server === server) {
+      try { routes.early.unregister?.() } catch {}
+      routes.early = null
+    }
     if (routes.mounted) {
       try { routes.unregister?.() } catch {}
       routes.mounted = false
@@ -1556,6 +1561,61 @@ export function apply(ctx, config = {}) {
         warnOnce(`dsbot-nodes 装不起来（${error?.message ?? error}）—— 插件功能不可用，DSH 继续跑`)
       }
     })
+  }
+
+  // 设置页的路由要等 bot 服务才挂得上。等不到的那段时间页面只有一句 HTTP 404，
+  // 连"卡在哪一步"都读不到。这里先挂一个最小路由：能读出原因，也能被页面上那个
+  // 「立即挂载」再催一次 —— 不必为了重试去重启整个 DSH。
+  const mountEarly = (server) => {
+    if (server?.register === undefined) return
+    const routes = routeState()
+    if (routes.early?.server === server) return
+    try { routes.early?.unregister?.() } catch {}
+    routes.early = null
+    const handler = async (req, res) => {
+      const url = new URL(req.url, 'http://localhost')
+      const path = url.pathname.replace(/\/+$/, '')
+      const crossSite = crossSiteReason(req)
+      if (crossSite !== null) return sendJson(res, crossSite.status, { ok: false, error: crossSite.error })
+      if (req.method === 'POST' && path === '/api/nodes/mount') {
+        // attach() 只是再订一次 'bot'：服务真来了就会走 install 挂正式路由。
+        try { attach() } catch { /* attach 内部自己记日志 */ }
+        return sendJson(res, 200, { ok: true, trying: true })
+      }
+      if (req.method === 'GET' && path === '/api/nodes/status') {
+        return sendJson(res, 200, {
+          ok: true,
+          pending: true,
+          reason: depsReady
+            ? '正在挂载，几秒后再刷新'
+            : "还没等到 bot 服务：ds-bot 缺 ctx.provide('bot', rt) 这一行补丁（升级 ds-bot 会冲掉）",
+          hosting: false,
+          code: null,
+          port: null,
+          network: { on: false, error: null },
+          easytier: { state: 'unknown', version: VERSION, dir: '', message: '' },
+          guard: guardStats(),
+          nodes: [],
+          groups: [],
+          join: { running: false },
+        })
+      }
+      return sendJson(res, 503, { ok: false, pending: true, error: '设置页路由还没挂载（在等 bot 服务）' })
+    }
+    try {
+      const off = server.register({ kind: 'prefix', path: '/api/nodes', handler })
+      routes.early = { server, unregister: typeof off === 'function' ? off : null }
+      bootNote('early route mounted（等 bot 服务期间也能读状态、点立即挂载）')
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      // 旧实例已经占着这个前缀（热重载）：它自己会挂正式路由，这里不抢。
+      if (!/duplicate prefix/i.test(message)) bootNote(`early route failed: ${message}`)
+    }
+  }
+  const earlyServer = ctx.get?.('webServer') ?? ctx.webServer
+  if (earlyServer?.register !== undefined) mountEarly(earlyServer)
+  else if (typeof ctx.inject === 'function') {
+    try { ctx.inject(['webServer'], sub => mountEarly(sub.get?.('webServer') ?? sub.webServer)) } catch {}
   }
 
   // 没有 'bot' 服务就什么都不发生：ds-bot 不自带 ctx.provide('bot', rt)，那一行是

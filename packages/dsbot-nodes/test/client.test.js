@@ -58,3 +58,12 @@ test('自动弹框按连接记一次，不会每次进设置页都弹出', () =>
   // 只认 running 就弹的旧写法不能再回来
   assert.doesNotMatch(source, /if \(join\?\.running === true\) \{\s*\n\s*setDialog\(true\)/)
 })
+
+// 路由还没挂上时（等 bot 服务），页面必须给出原因和一次重试，而不是只剩 HTTP 404。
+test('等不到 bot 服务时，设置页显示原因和「立即挂载」', () => {
+  assert.match(source, /state\?\.pending\s*\n\s*\? card\(\[/)
+  assert.match(source, /label\('设置页还没挂上'\)/)
+  assert.match(source, /jpost\('\/mount'\)/)
+  // 没挂上时不要再显示一串占位配对码，那会让人以为码是坏的
+  assert.match(source, /state\?\.pending \? null : card\(\[/)
+})
