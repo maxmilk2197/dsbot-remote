@@ -92,6 +92,7 @@ v1 用 EasyTier / WireGuard 组网 + 自建 TCP 直连。两份代码互不干�
 
 - 远程节点设置页显示「读不到状态: HTTP 404」「没在监听」，配对码是空的破折号；
 - `~/.dsh/dsbot-nodes/logs/current.log` 里只有 `apply called` 和 `install deferred`，之后再没有 `deps ready`；
+- 日志里那行 `ds-bot vX 缺 ctx.provide('bot', rt) · <路径>` 直接点名**实际被加载的那份文件**——以它为准，不要猜 `index.js`。0.3.8 的入口是 `plugin.js`（`package.json` 的 `main`），补 `index.js` 不会生效；
 - 7777 端口没有监听（`hosting.start()` 根本没跑）。
 
 现在用 pnpm 补丁固定住了（profile 目录）：
@@ -107,7 +108,8 @@ patchedDependencies:
 ```bash
 cd ~/.dsh/profiles/<profile>
 pnpm patch ds-bot@<新版本> --edit-dir .tmp-patch-ds-bot
-# 在 .tmp-patch-ds-bot/index.js 的 createRuntime 里、return rt 之前加：
+# 在 .tmp-patch-ds-bot/plugin.js（0.3.8 的入口，老版本可能是 index.js）的
+# createRuntime 里、return rt 之前加：
 #   ctx.provide('bot', rt)
 pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patches/
 ```
