@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import net from 'node:net'
 import { once } from 'node:events'
-import { BadFrame, FrameReader, Peer, connectTcp, encodeFrame, listenTcp, parseTcpUrl } from '../src/transport/tcp.js'
+import { BadFrame, FrameReader, Peer, connectTcp, encodeFrame, listenTcp, parseTcpUrl } from '../src/protocol/transport/tcp.js'
 
 test('一帧编码后能读回来，中文不丢', () => {
   const frame = { t: 'msg', text: '写代码那台已上线', n: 42 }

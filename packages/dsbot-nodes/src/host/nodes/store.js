@@ -7,7 +7,7 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { NodeFailure } from '@dsbot/node-protocol/errors'
+import { NodeFailure } from '../../protocol/errors.js'
 
 // No 0/O/1/I/L: a code is read off a screen and typed on another machine.
 const ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'

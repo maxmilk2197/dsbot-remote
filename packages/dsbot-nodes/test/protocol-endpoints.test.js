@@ -1,7 +1,7 @@
 // 本文件由 AI 生成，请勿用于生产环境。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CONTROL_ENDPOINTS, ENDPOINTS, NODE_ENDPOINTS, isNodeEndpoint, validateFields } from '../src/index.js'
+import { CONTROL_ENDPOINTS, ENDPOINTS, NODE_ENDPOINTS, isNodeEndpoint, validateFields } from '../src/protocol/index.js'
 
 test('17 个端点，控制面 7 个、节点面 10 个', () => {
   assert.equal(Object.keys(ENDPOINTS).length, 17)

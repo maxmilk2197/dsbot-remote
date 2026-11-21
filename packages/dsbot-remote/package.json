@@ -13,7 +13,5 @@
   "scripts": {
     "test": "node --test --test-timeout=30000 \"test/*.test.js\""
   },
-  "dependencies": {
-    "@dsbot/node-protocol": "workspace:*"
-  }
+  "dependencies": {}
 }

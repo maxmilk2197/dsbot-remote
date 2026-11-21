@@ -119,14 +119,16 @@ https://github.com/maxmilk2197/dsbot-remote#path:/packages/dsbot-nodes
 
 | 包 | 作用 |
 | --- | --- |
-| `@dsbot/node-protocol` | 信封、方法表、错误码、校验、TCP 传输（两端共用，零依赖） |
-| `dsbot-nodes` | 主机侧 cordis 插件：连接管理、`node:` LLM adapter、群绑定、`node_remote` 工具 |
+| `dsbot-nodes` | 主机侧 cordis 插件：连接管理、`node:` LLM adapter、群绑定、`node_remote` 工具；线协议（信封、方法表、错误码、校验、TCP 传输）内联在 `src/protocol/`，**零运行时依赖** |
 | `dsbot-remote` | 远程侧 CLI：listen/connect、切帧、`exec` 白名单、agent 子进程 |
+
+线协议原先单独成包（`@dsbot/node-protocol`），后来并进 `dsbot-nodes`：pnpm 默认
+`blockExoticSubdeps` 不允许子依赖再指向 git 地址，拆包会让"粘仓库链接就装"直接失败。
+现在这个插件**没有任何 dependencies**，装它不需要额外的包先到位。
 
 ## 测试
 
 ```bash
-cd packages/node-protocol && node --test
 cd packages/dsbot-nodes  && node --test
 cd packages/dsbot-remote && node --test
 ```

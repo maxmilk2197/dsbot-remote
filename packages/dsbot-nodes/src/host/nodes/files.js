@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
-import { MAX_FILE_BYTES } from '@dsbot/node-protocol/version'
+import { MAX_FILE_BYTES } from '../../protocol/version.js'
 
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
 const ILLEGAL = /[\u0000-\u001f<>:"|?*\u007f]/g

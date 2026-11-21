@@ -3,8 +3,8 @@
 //
 // 配对码是这把门钥匙的全部：远程只输码，既拿到地址（UDP 广播应答），也用它
 // 当握手的 KDF 盐（v2 起码不再明文上网）。换码 = rotate()，旧码立刻失效。
-import { listenDiscovery } from '@dsbot/node-protocol/discovery'
-import { listenTcp } from '@dsbot/node-protocol/tcp'
+import { listenDiscovery } from '../../protocol/transport/discovery.js'
+import { listenTcp } from '../../protocol/transport/tcp.js'
 import { elevateEasyTier, findEasyTier, hasLocalIp, hostTag, hostVirtualIp, lanAddress, localSubnets, pairCredentials, startEasyTier, writeElevateScript } from '../../node/easytier.js'
 
 export const DEFAULT_PORT = 7777

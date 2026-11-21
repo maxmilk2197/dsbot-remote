@@ -5,7 +5,7 @@
 import { spawn } from 'node:child_process'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { EXEC_OUTPUT_LIMIT, EXEC_TIMEOUT_MS, MAX_FILE_BYTES } from '@dsbot/node-protocol/version'
+import { EXEC_OUTPUT_LIMIT, EXEC_TIMEOUT_MS, MAX_FILE_BYTES } from '../protocol/version.js'
 
 export const ALLOWED_ACTIONS = Object.freeze(['read_file', 'list_dir', 'run_shell', 'push_file', 'env_info'])
 

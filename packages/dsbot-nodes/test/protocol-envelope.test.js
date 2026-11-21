@@ -14,7 +14,7 @@ import {
   NodeFailure,
   outboundMethods,
   directionAllows,
-} from '../src/index.js'
+} from '../src/protocol/index.js'
 
 test('十个业务事件，名字与方向都在', () => {
   assert.equal(BUSINESS_METHODS.length, 10)

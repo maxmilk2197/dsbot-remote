@@ -114,22 +114,23 @@ pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patch
 
 插件侧也加了兜底：装不上 45 秒后会往 nodes-boot.log 写一句「等不到 bot 服务」，指明是这行补丁。
 
-## 从 GitHub 装：protocol 依赖为什么是 git 地址
+## 从 GitHub 装：线协议为什么并进了插件
 
-`packages/dsbot-nodes/package.json` 里 `@dsbot/node-protocol` 写的是
-`https://github.com/maxmilk2197/dsbot-remote#path:/packages/node-protocol`，
-不再是 `file:../node-protocol`。原因只有一个：插件要能"粘仓库地址就装"。
+这个插件要能"粘仓库地址就装"（`…/dsbot-remote#path:/packages/dsbot-nodes`）。
+为此线协议原来那个独立包 `@dsbot/node-protocol` 被**合进**
+`packages/dsbot-nodes/src/protocol/`，插件现在 `"dependencies"` 是空的。
 
-pnpm 装 git 依赖时先把这个子目录打成 tarball 再装；包里那条 `file:../node-protocol`
-会按**装机目录**解析（实测解析到 `D:\Default\node-protocol`，然后
-`ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND`）。改成绝对可达的 git 地址就没这回事。
+试过但不可行的两条路：
 
-代价：本机改 `packages/node-protocol` 的源码后，profile 里那份要重新
-`pnpm install` 才会跟上；想边改边生效，在 profile 的 `pnpm-workspace.yaml` 里临时加
+1. 子包依赖写 `file:../node-protocol` —— pnpm 会把 git 依赖的子目录先打成
+   tarball 再装，tarball 里那条相对路径按**装机目录**解析（实测解析到
+   `D:\Default\node-protocol`），报 `ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND`。
+2. 改成 git 地址（`…/dsbot-remote#path:/packages/node-protocol`）—— pnpm 11
+   默认开着 `blockExoticSubdeps`，子依赖里出现 git 说明符直接拒：
+   `ERR_PNPM_EXOTIC_SUBDEP: Exotic dependency "@dsbot/node-protocol" (resolved via
+   git-repository) is not allowed in subdependencies`。这个开关在**装机方**的 pnpm
+   配置里，插件管不到。
 
-```yaml
-overrides:
-  '@dsbot/node-protocol': 'file:D:/Default/dsbot-remote/packages/node-protocol'
-```
-
-用完删掉 —— 留着的话，别人装这个插件也会被拉到你的本地路径。
+所以现在只有一份实现：`packages/dsbot-nodes/src/protocol/`（`index.js` 汇总导出，
+`transport/tcp.js` 与 `transport/discovery.js` 是传输层）。它的 34 个测试跟着搬到了
+`packages/dsbot-nodes/test/protocol-*.test.js`，跑插件测试就一起跑。

@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
-import { connectTcp } from '@dsbot/node-protocol/tcp'
+import { connectTcp } from '../src/protocol/transport/tcp.js'
 import { install, resetInstall } from '../src/host/nodes/index.js'
 import { servePeer } from '../src/node/cli.js'
 

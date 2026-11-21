@@ -1,6 +1,6 @@
 # Node Protocol v1
 
-> 线上协议规范。两端实现（主机 `nodes` module、远程 `dsbot-remote`）都以 `@dsbot/node-protocol` 为唯一事实来源，不手写常量。
+> 线上协议规范。实现只有一份：`packages/dsbot-nodes/src/protocol/`（主机插件与远程 CLI 都用它），不手写常量。
 
 ---
 
@@ -147,7 +147,7 @@
 
 - `proto` 只在**加字段**时不动；删字段/改语义才升到 2，且主机同时接受 1 和 2 一个版本周期。
 - 未知 `method` 一律 `rpc.error{node/unknown-method}`，不静默丢。
-- `@dsbot/node-protocol` 导出：`PROTOCOL_VERSION`、`METHODS`、`ENDPOINTS`、`ERROR_CODES`、`parseFrame()`、`encodeFrame()`、`validate(method, params)`。
+- `src/protocol/index.js` 导出：`PROTOCOL_VERSION`、`METHODS`、`ENDPOINTS`、`ERROR_CODES`、`parseFrame()`、`encodeFrame()`、`validate(method, params)`。
 
 ## 附件：远端文件进群的唯一路径
 

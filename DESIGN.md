@@ -98,7 +98,7 @@
 | --- | --- |
 | 配对 | 主机制一次性码（6 位 / 5 分钟）→ 远程换长期 token，主机可单台撤销 |
 | 线协议 | `rpc.request/response/error/event` 信封，`PROTOCOL_VERSION = 1`，不匹配直接拒 |
-| 协议共享 | 独立包 `@dsbot/node-protocol`（类型 + 校验 + 信封助手），两端依赖它 |
+| 协议共享 | 一份实现，内联在 `packages/dsbot-nodes/src/protocol/`（信封 + 校验 + 传输）；不拆独立包，否则插件装不上 |
 | 远程包 | `dsbot-remote`（DSH 插件，role=`node`），**同时装 ds-bot**（要用它的 bots/头像/记忆） |
 | 远程模型 | 用远程 DSH 已配好的 provider（远程自备 key，主机不存 key） |
 | 每群会话 | 远程侧 `groupId → sessionId` 持久映射，一群一会话 |

@@ -3,8 +3,8 @@
 //
 // 和主机侧的 hosting.js 正好反过来：那边开端口等人来，这边广播找人过去。
 // 两边共用同一份 node/ 实现，所以装上同一个插件，一台机器既能当主机也能被控。
-import { findHost } from '@dsbot/node-protocol/discovery'
-import { connectTcp } from '@dsbot/node-protocol/tcp'
+import { findHost } from '../../protocol/transport/discovery.js'
+import { connectTcp } from '../../protocol/transport/tcp.js'
 import { parseAgentCommand } from '../../node/agent.js'
 import { pickLocalModel } from '../../node/local-agent.js'
 import { deviceIdentity, servePeer } from '../../node/cli.js'

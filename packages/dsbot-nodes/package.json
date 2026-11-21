@@ -16,9 +16,6 @@
   "scripts": {
     "test": "node --test --test-timeout=30000 \"test/*.test.js\""
   },
-  "dependencies": {
-    "@dsbot/node-protocol": "https://github.com/maxmilk2197/dsbot-remote#path:/packages/node-protocol"
-  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

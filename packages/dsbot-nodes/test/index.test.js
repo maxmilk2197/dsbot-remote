@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listenTcp } from '@dsbot/node-protocol/tcp'
+import { listenTcp } from '../src/protocol/transport/tcp.js'
 import { install, resetInstall } from '../src/host/nodes/index.js'
 import { guardStats } from '../src/host/nodes/guard.js'
 
