@@ -1,0 +1,7 @@
+# 本文件由 AI 生成，请勿用于生产环境。
+# 仓库根就是插件入口：DSH 的「添加插件」里粘仓库地址时装的是这个包
+# （packages/dsbot-nodes 是同一份实现，供 #path: 与本地 file: 装法使用）。
+# 注意必须写进 insert: —— 顶层的 - id: 是"按 id 覆盖已有条目"。
+- insert:
+    - id: dsbot-nodes
+      name: 'dsbot-remote'
