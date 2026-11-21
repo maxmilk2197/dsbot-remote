@@ -1538,10 +1538,47 @@ function isDisabled() {
 
 export function apply(ctx, config = {}) {
   bootNote(`apply called (${MODULE_ID})`)
+  // 整段兜住：apply 抛出去的异常只会进 DSH 的 console，插件自己的日志里
+  // 就断在半句话上（真机上就见过日志停在 "config: (空)" 之后再无下文）。
+  try {
+    applyPlugin(ctx, config)
+  } catch (error) {
+    bootNote(`apply 抛错: ${error?.stack ?? error?.message ?? error}`)
+  }
+}
+
+// 不同 cordis 版本上"取一个服务"的入口不一样，拿不到就算是住上下文的那种
+// （真机上 apply 拿到的 ctx 一 get 就抛 inactive context）。逐个试，别只试一条路：
+// 早期路由挂不上，等不到 bot 服务时页面就只剩一句 404。
+function findWebServer(ctx) {
+  const notes = []
+  const probes = [
+    ['ctx.get', () => ctx.get?.('webServer')],
+    ['ctx.webServer', () => ctx.webServer],
+    ['ctx.root.get', () => ctx.root?.get?.('webServer')],
+    ['ctx.root.webServer', () => ctx.root?.webServer],
+    ['ctx.reflect.get', () => ctx.reflect?.get?.('webServer')],
+  ]
+  for (const [label, probe] of probes) {
+    try {
+      const server = probe()
+      if (server?.register !== undefined) {
+        if (notes.length > 0) notes.push(`webServer 从 ${label} 拿到（前几条路失败过）`)
+        return { server, notes }
+      }
+    } catch (error) {
+      notes.push(`${label} 读 webServer 抛错: ${error?.message ?? error}`)
+    }
+  }
+  return { server: undefined, notes }
+}
+
+function applyPlugin(ctx, config = {}) {
   bootNote(`config: ${Object.keys(config ?? {}).join(',') || '(空)'}`)
   // 旧版本把 nodes.json 放在 ds-bot 的家目录里。第一次跑到新目录时搬过来，
   // 搬过什么、搬到哪都写一行 —— 记录丢了就得挨个重新配对，不能静默。
   try { migrateLegacyData(bootNote) } catch (error) { bootNote(`migrate 失败: ${error?.message ?? error}`) }
+  bootNote('migrate done')
   if (isDisabled()) {
     bootNote('disabled by nodes-off')
     return
@@ -1628,10 +1665,22 @@ export function apply(ctx, config = {}) {
       if (!/duplicate prefix/i.test(message)) bootNote(`early route failed: ${message}`)
     }
   }
-  const earlyServer = ctx.get?.('webServer') ?? ctx.webServer
+  const { server: earlyServer, notes } = findWebServer(ctx)
+  for (const note of notes) bootNote(note)
   if (earlyServer?.register !== undefined) mountEarly(earlyServer)
   else if (typeof ctx.inject === 'function') {
-    try { ctx.inject(['webServer'], sub => mountEarly(sub.get?.('webServer') ?? sub.webServer)) } catch {}
+    bootNote('early route: 还没拿到 webServer，等它出现')
+    try {
+      ctx.inject(['webServer'], (sub) => {
+        let server
+        try { server = sub.get?.('webServer') ?? sub.webServer } catch (error) {
+          bootNote(`订阅 webServer 后仍读不到: ${error?.message ?? error}`)
+        }
+        mountEarly(server)
+      })
+    } catch (error) {
+      bootNote(`订阅 webServer 失败: ${error?.message ?? error}`)
+    }
   }
 
   // 没有 'bot' 服务就什么都不发生：ds-bot 不自带 ctx.provide('bot', rt)，那一行是

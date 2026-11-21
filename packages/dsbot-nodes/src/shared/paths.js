@@ -62,6 +62,8 @@ export function rotateLogsOnce({ force = false } = {}) {
 export function appendLog(line) {
   rotateLogsOnce()
   try {
+    // 目录可能不在：轮转只跑一次，但 DSBOT_NODES_HOME 换了之后仍可能写新路径。
+    mkdirSync(logsDir(), { recursive: true })
     appendFileSync(logFile(), line.endsWith('\n') ? line : line + '\n')
   } catch {}
 }

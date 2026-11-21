@@ -5,7 +5,7 @@ process.env.DSBOT_NODES_TEST = '1'
 process.env.DSBOT_NODES_DELAY_MS = '0'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -60,9 +60,38 @@ test('等不到 bot 服务时，状态口仍然可读，且能催一次挂载', 
     // 早期路由只回答这两条，别的一律 503，不假装自己是完整接口。
     const other = await call(early.handler, 'GET', '/api/nodes/rotate')
     assert.equal(other.status, 503)
+    const log = await readFile(join(home, 'dsbot-nodes', 'logs', 'current.log'), 'utf8')
+    assert.match(log, /early route mounted/)
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+// 真机上日志停在 "config: (空)" 之后再无下文：apply 里抛出去的异常只会进
+// DSH 的 console。这里钉住"抛了也要继续、并且把原因写进自己的日志"。
+test('拿到手的 ctx 读服务会抛错时，apply 不跟着炸，原因进日志', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'early-throw-'))
+  const previous = process.env.DSBOT_NODES_HOME
+  process.env.DSBOT_NODES_HOME = home
+  try {
+    const { apply, resetInstall } = await import('../src/host/nodes/index.js')
+    resetInstall?.()
+    const ctx = {
+      get() { throw new Error('cannot get service on inactive context') },
+      inject() {},
+      effect() {},
+    }
+    assert.doesNotThrow(() => apply(ctx, {}))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const log = await readFile(join(home, 'logs', 'current.log'), 'utf8') // DSBOT_NODES_HOME 本身就是数据目录
+    assert.match(log, /ctx\.get 读 webServer 抛错: cannot get service on inactive context/)
+    // 读不到 webServer 不等于整段停下：后面的订阅照样排上。
+    assert.match(log, /attach #1|install deferred/)
+  } finally {
+    if (previous === undefined) delete process.env.DSBOT_NODES_HOME
+    else process.env.DSBOT_NODES_HOME = previous
     await rm(home, { recursive: true, force: true }).catch(() => {})
   }
 })
