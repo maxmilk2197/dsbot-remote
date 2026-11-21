@@ -181,6 +181,20 @@ node packages/dsbot-nodes/probe-install.mjs
 node packages/dsbot-nodes/probe-turn.mjs
 ```
 
+## 数据放在哪（插件自己的文件夹）
+
+插件不挤 ds-bot 的 `~/.dsh/bot/`，状态都在 `~/.dsh/dsbot-nodes/`：
+
+| 路径 | 内容 |
+| --- | --- |
+| `nodes.json` | 节点与配对记录（升级、清宿主缓存都带不走） |
+| `nodes-off` | 紧急开关：存在就完全不装 |
+| `logs/current.log` | 这一次运行的日志，每行带版本号与 PID 环境 |
+| `logs/previous.log` | 上一次运行；**只留两份**，第三次启动时更早的自动删 |
+| `easytier/` | EasyTier 下载缓存 |
+
+老版本的 `nodes.json` / `nodes-off` / `nodes-boot.log` 在 `~/.dsh/bot/` 下，第一次启动会搬到新目录并删原件；旧日志搬成 `previous.log`，正好能和上一次对照。`DSBOT_NODES_HOME` 可以整体换目录（绿色版/测试用）。
+
 ## 成熟度
 
 **全部代码由 AI 生成，未经人工逐行审计。** 按证据分三档：
@@ -195,7 +209,7 @@ node packages/dsbot-nodes/probe-turn.mjs
 | 文件落盘 | 10 测试（sha256 已知向量、Windows 设备名、重名） |
 | 配对码广播 | 本机跑通 |
 | exec / turn / 文件回传 | 端到端各跑通一次（本机自环） |
-| 插件加载 | `nodes-boot.log` 四行 + `/api/nodes/status` |
+| 插件加载 | `~/.dsh/dsbot-nodes/logs/current.log` 四行 + `/api/nodes/status` |
 
 ### 写完了、一次都没跑
 
@@ -226,7 +240,7 @@ node packages/dsbot-nodes/probe-turn.mjs
 仓库**不再内置** EasyTier 二进制（每个平台约 30MB，放仓库里既臃肿又容易版本不一致）。第一次真正要跨网时，插件会按当前平台从 [EasyTier Releases](https://github.com/EasyTier/EasyTier/releases) 下载一次，解压后缓存在：
 
 ```
-~/.dsh/bot/easytier/<版本>/<平台-架构>/
+~/.dsh/dsbot-nodes/easytier/<版本>/<平台-架构>/
 ```
 
 之后直接复用，不再联网。**没有它局域网内照常工作，只是跨不了网。**

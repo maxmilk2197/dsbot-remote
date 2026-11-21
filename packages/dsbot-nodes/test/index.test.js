@@ -32,6 +32,8 @@ const makeRt = async () => {
   // 否则后面所有用例都会拿到第一个用例的 store 和 peers。
   resetInstall()
   const home = await mkdtemp(join(tmpdir(), 'nodes-'))
+  // 插件的记录现在放在自己的目录里：测试用 DSBOT_NODES_HOME 指向这个临时家。
+  process.env.DSBOT_NODES_HOME = home
   const registered = []
   const rt = {
     home,

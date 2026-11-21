@@ -91,7 +91,7 @@ v1 用 EasyTier / WireGuard 组网 + 自建 TCP 直连。两份代码互不干�
 `ctx.provide('bot', rt)` 是 ds-bot 上游没有、由我们打上去的。**在 DS Bot 设置页点【更新】或 `pnpm update ds-bot` 会把 node_modules 换回原版，补丁消失**，症状是：
 
 - 远程节点设置页显示「读不到状态: HTTP 404」「没在监听」，配对码是空的破折号；
-- `~/.dsh/bot/nodes-boot.log` 里只有 `apply called` 和 `install deferred`，之后再没有 `deps ready`；
+- `~/.dsh/dsbot-nodes/logs/current.log` 里只有 `apply called` 和 `install deferred`，之后再没有 `deps ready`；
 - 7777 端口没有监听（`hosting.start()` 根本没跑）。
 
 现在用 pnpm 补丁固定住了（profile 目录）：
@@ -112,7 +112,7 @@ pnpm patch ds-bot@<新版本> --edit-dir .tmp-patch-ds-bot
 pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patches/
 ```
 
-插件侧也加了兜底：装不上 45 秒后会往 nodes-boot.log 写一句「等不到 bot 服务」，指明是这行补丁。
+插件侧也加了兜底：装不上 45 秒后会往日志写一句「等不到 bot 服务」，指明是这行补丁。
 
 ## 从 GitHub 装：线协议为什么并进了插件
 

@@ -10,24 +10,19 @@
 //   2. 不同模块实例（热重载）→ 先把旧实例彻底拆掉，再装新的，绝不让两个监听并存。
 //
 // 还有一个坑：cordis 每装一次就 dispose 一次 sub context，卸载回调来得又密又早
-// （nodes-boot.log 里 8 次 install 之间夹着 8 次卸载）。一卸载就拆实例，下一次
+// （日志里 8 次 install 之间夹着 8 次卸载）。一卸载就拆实例，下一次
 // apply 又得重建 —— 等于没防住。所以卸载只登记"待释放"，给一段宽限；期间有人
 // 再来认领就取消，真的没人用了才拆。
 
-import { appendFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { threadId } from 'node:worker_threads'
+import { appendLog } from '../../shared/paths.js'
 
 // 临时追踪：同一个 moduleId 却被反复重建，先看清是谁清掉 owner 的。
 function trace(text) {
   // 只有显式打开才写：这条日志一天能涨到几百 KB，生产环境没理由为了一句
   // 追踪一直往磁盘上写。调试多开时设 DSBOT_NODES_TRACE=1。
   if (process.env.DSBOT_NODES_TRACE !== '1') return
-  try {
-    const base = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
-    appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} guard-trace ${text} thread=${threadId}\n`)
-  } catch {}
+  appendLog(`${new Date().toISOString()} guard-trace ${text} thread=${threadId}`)
 }
 
 const KEY = Symbol.for('dsbot-nodes.instance/v1')

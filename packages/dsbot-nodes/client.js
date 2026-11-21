@@ -531,7 +531,7 @@
       if (!/HTTP 404/.test(message)) return '读不到状态：' + message
       return '读不到状态：HTTP 404 —— 路由还没挂上。宿主 ds-bot 缺 ctx.provide(\'bot\', rt) '
         + '这一行补丁（升级 ds-bot 会冲掉），或刚启动还没到挂载时间（约 20 秒）。'
-        + '看 ~/.dsh/bot/nodes-boot.log：末尾有「等不到 bot 服务」就是补丁没了。'
+        + '看 ~/.dsh/dsbot-nodes/logs/current.log：末尾有「等不到 bot 服务」就是补丁没了。'
     }
 
     function Panel() {

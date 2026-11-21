@@ -34,9 +34,9 @@ try {
   defineTool = definition => definition
 }
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { bindNodeToGroup, forgetNode, renameProxyBot, unbindNodeFromGroup } from './bind.js'
 import { machineNameOf, pickNodeName, shouldRename } from './naming.js'
@@ -49,6 +49,7 @@ import { connectTcp } from '../../protocol/transport/tcp.js'
 import { directionAllows, methodOf } from '../../protocol/methods.js'
 import { validateFields } from '../../protocol/validate.js'
 import { claimInstance, guardStats, newModuleId, releaseInstance, resetGuard } from './guard.js'
+import { appendLog, dataHome, logFile, migrateLegacyData } from '../../shared/paths.js'
 
 export const name = 'dsbot-nodes'
 export const inject = []
@@ -58,11 +59,9 @@ const CALL_TIMEOUT_MS = 60_000
 
 // 装车自证：三个点各写一行，卡在哪一段一眼就能看出来
 // （模块 import 了没有 / apply 被调了没有 / install 拿没拿到运行时）。
-// 插件的家目录：启动日志、紧急开关都放这儿。
-function botHome() {
-  return process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
-}
-
+// 插件自己的文件夹（见 src/shared/paths.js）：日志、节点记录、紧急开关都在
+// ~/.dsh/dsbot-nodes/ 下，不再寄生在 ds-bot 的 ~/.dsh/bot/ 里。
+//
 // 日志每行都带版本号：用户贴一段 tail 过来，第一件要确认的事就是"你装的是哪一版"。
 // 读包自己的 package.json —— 装成仓库根包或子目录包时，两处版本号是同步的。
 const VERSION = (() => {
@@ -74,15 +73,12 @@ const VERSION = (() => {
 })()
 
 function bootNote(text) {
-  try {
-    const base = botHome()
-    mkdirSync(base, { recursive: true })
-    appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} ${text} · v${VERSION}
-`)
-  } catch {}
+  appendLog(`${new Date().toISOString()} ${text} · v${VERSION}`)
 }
 
 bootNote('module imported')
+bootNote(`env node=${process.versions.node} platform=${platform()} arch=${process.arch} pid=${process.pid}`)
+bootNote(`data dir ${dataHome()}  log ${logFile()}`)
 
 // DSH 会把同一个插件装进好几个上下文：日志里一次热重载能看到 install 连跑七遍。
 // 每遍都新建一个 store、抢一次 7777、往 teamTools 里推一份工具、挂一份路由 ——
@@ -105,7 +101,7 @@ export function install(rt) {
 
 // 测试用：让每个用例都能拿到干净的实例。
 //
-// 注意：DSH 在每次 apply 前后会调用插件导出的 reset* 函数（nodes-boot.log 里
+// 注意：DSH 在每次 apply 前后会调用插件导出的 reset* 函数（日志里
 // 每 100ms 一次 resetInstall）。生产环境必须什么都不做 —— 否则防多开刚建好的
 // 实例会被立刻清掉，下一次 apply 又重建一份，等于白防。
 export function resetInstall() {
@@ -116,7 +112,7 @@ export function resetInstall() {
 }
 
 function installOnce(rt) {
-  bootNote('install')
+  bootNote(`install（store ${join(dataHome(), 'nodes.json')}，rt.home=${rt.home ?? '(未给)'}）`)
 
   const { ctx } = rt
   const warn = typeof rt.warn === 'function' ? rt.warn : () => {}
@@ -124,7 +120,7 @@ function installOnce(rt) {
   // 约定（store.js:32）：readOnly() 返回 undefined 表示可写，返回原因字符串表示只读。
   // 传成 false 会被当成"只读"，然后所有写操作都抛 node/read-only。
   const store = createNodeStore({
-    home: rt.home,
+    home: dataHome(),
     readOnly: () => {
       const reason = typeof rt.readOnly === 'function' ? rt.readOnly() : undefined
       // store 的约定是"undefined 才可写"，而 rt.readOnly() 这边可能是布尔：
@@ -343,6 +339,7 @@ function installOnce(rt) {
         // 显示"离线"、工作区那一行跟着消失，而节点其实好好的。
         const previous = peers.get(nodeId)
         peers.set(nodeId, peer)
+        bootNote(`node online: ${nodeId}${previous === undefined || previous === peer ? '' : '（换了新连接）'}`)
         if (previous !== undefined && previous !== peer) {
           warn('dsbot-nodes: %s 换了一条新连接，旧的断开', nodeId)
           // 旧连接上还挂着的轮次不会再有 turn.result 了：明说一句掉线，
@@ -354,6 +351,7 @@ function installOnce(rt) {
         const drop = () => {
           if (peers.get(nodeId) !== peer) return
           peers.delete(nodeId)
+          bootNote(`node offline: ${nodeId}`)
           // 这条连接上还在等回音的请求不会再有回答了：当场拒掉。否则界面要
           // 干等 60 秒（CALL_TIMEOUT_MS）才收到一句"超时"，看着像卡死。
           for (const [id, waiter] of waiters) {
@@ -1340,6 +1338,7 @@ function registerRoutes(rt, api, hosting) {
       routes.mounted = true
       routes.server = server
       routes.unregister = typeof off === 'function' ? off : null
+      bootNote('routes mounted（正式接口）')
     } catch (error) {
       const message = String(error?.message ?? error)
       if (/duplicate prefix/i.test(message)) {
@@ -1532,13 +1531,17 @@ function registerTool(rt, api, resolveNode) {
 // 排查时可以 DSBOT_NODES_DELAY_MS=0 恢复即时安装。
 const STARTUP_DELAY_MS = 20_000
 
-// 紧急开关：~/.dsh/bot/nodes-off 存在就完全不装。删掉文件、重启即恢复。
+// 紧急开关：~/.dsh/dsbot-nodes/nodes-off 存在就完全不装。删掉文件、重启即恢复。
 function isDisabled() {
-  try { return existsSync(join(botHome(), 'nodes-off')) } catch { return false }
+  try { return existsSync(join(dataHome(), 'nodes-off')) } catch { return false }
 }
 
 export function apply(ctx, config = {}) {
   bootNote(`apply called (${MODULE_ID})`)
+  bootNote(`config: ${Object.keys(config ?? {}).join(',') || '(空)'}`)
+  // 旧版本把 nodes.json 放在 ds-bot 的家目录里。第一次跑到新目录时搬过来，
+  // 搬过什么、搬到哪都写一行 —— 记录丢了就得挨个重新配对，不能静默。
+  try { migrateLegacyData(bootNote) } catch (error) { bootNote(`migrate 失败: ${error?.message ?? error}`) }
   if (isDisabled()) {
     bootNote('disabled by nodes-off')
     return
@@ -1547,9 +1550,13 @@ export function apply(ctx, config = {}) {
   // 顶层 inject 里不写 'bot'：服务还没来时 cordis 连 apply 都不调，出问题只能看到
   // "什么都没发生"。改成运行时订阅——先证明插件活着，再等 ds-bot 把 runtime 挂上来。
   let depsReady = false
+  let attachTries = 0
   const attach = () => {
+    attachTries += 1
+    const startedAt = Date.now()
+    bootNote(`attach #${attachTries}: 订阅 bot 服务`)
     ctx.inject(['bot', 'llm'], (sub) => {
-      bootNote('deps ready')
+      bootNote(`deps ready（第 ${attachTries} 次订阅，等了 ${Date.now() - startedAt}ms）`)
       depsReady = true
       // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
       // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
@@ -1569,7 +1576,13 @@ export function apply(ctx, config = {}) {
   const mountEarly = (server) => {
     if (server?.register === undefined) return
     const routes = routeState()
-    if (routes.early?.server === server) return
+    if (routes.early?.server === server) {
+      // 热重载换了模块：路由本身留着（同一台 webServer），但挂载入口要换成
+      // 新实例的 attach —— 旧闭包里的那份 ctx 已经失效了。
+      routes.early.attach = attach
+      bootNote('early route kept（同一台 webServer，挂载入口换成新实例）')
+      return
+    }
     try { routes.early?.unregister?.() } catch {}
     routes.early = null
     const handler = async (req, res) => {
@@ -1579,7 +1592,10 @@ export function apply(ctx, config = {}) {
       if (crossSite !== null) return sendJson(res, crossSite.status, { ok: false, error: crossSite.error })
       if (req.method === 'POST' && path === '/api/nodes/mount') {
         // attach() 只是再订一次 'bot'：服务真来了就会走 install 挂正式路由。
-        try { attach() } catch { /* attach 内部自己记日志 */ }
+        // 走 routeState 里那份，热重载后这里拿到的是新实例的 attach。
+        const holder = routeState().early
+        bootNote('POST /mount：再催一次挂载')
+        try { (holder?.attach ?? attach)() } catch { /* attach 内部自己记日志 */ }
         return sendJson(res, 200, { ok: true, trying: true })
       }
       if (req.method === 'GET' && path === '/api/nodes/status') {
@@ -1604,7 +1620,7 @@ export function apply(ctx, config = {}) {
     }
     try {
       const off = server.register({ kind: 'prefix', path: '/api/nodes', handler })
-      routes.early = { server, unregister: typeof off === 'function' ? off : null }
+      routes.early = { server, unregister: typeof off === 'function' ? off : null, attach }
       bootNote('early route mounted（等 bot 服务期间也能读状态、点立即挂载）')
     } catch (error) {
       const message = String(error?.message ?? error)

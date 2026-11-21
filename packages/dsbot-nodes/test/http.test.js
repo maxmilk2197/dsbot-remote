@@ -16,6 +16,7 @@ const makeRt = async () => {
   // 后面每个用例都得把它清回 false，否则会以为"没挂上"。
   globalThis[Symbol.for('dsbot-nodes.routes/v1')] = { mounted: false, unregister: null, current: null }
   const home = await mkdtemp(join(tmpdir(), 'http-'))
+  process.env.DSBOT_NODES_HOME = home
   const captured = { handler: null }
   const rt = {
     home,

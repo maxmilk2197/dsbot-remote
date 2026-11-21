@@ -19,10 +19,11 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, networkInterfaces } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { ensureEasyTier, easyTierCacheDir, findEasyTierBinaries } from './easytier-fetch.js'
+import { dataHome } from '../shared/paths.js'
 
-export const EASYTIER_DIR = join(homedir(), '.dsbot-remote', 'easytier')
+export const EASYTIER_DIR = join(dataHome(), 'easytier')
 // 二进制不再随仓库分发：第一次要跨网时按当前平台自动下载一份，缓存在
-// ~/.dsh/bot/easytier/<版本>/<平台-架构>/。离线环境把解压好的目录给
+// ~/.dsh/dsbot-nodes/easytier/<版本>/<平台-架构>/。离线环境把解压好的目录给
 // DSBOT_EASYTIER_DIR，那边优先用，不联网。
 // 跨网必须有个"会合点"：两端不在同一张局域网时，得先在一个公共节点上互相发现。
 //
@@ -231,7 +232,7 @@ const isWindows = process.platform === 'win32'
  *   1. 显式给的目录（测试 / 调用方指定）
  *   2. DSBOT_EASYTIER_DIR（离线安装）
  *   3. 自动下载的缓存
- *   4. ~/.dsbot-remote/easytier、常见安装目录、PATH
+ *   4. ~/.dsh/dsbot-nodes/easytier、常见安装目录、PATH
  *   5. 都没有 → 按平台下载一份（测试环境不联网）
  *
  * 下载失败会抛错，让界面看到"为什么跨网没起来"，而不是笼统的"没找到"。

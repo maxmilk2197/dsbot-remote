@@ -567,11 +567,11 @@ async function runPair(args) {
       try {
         await ensureEasyTier({ onLog: line => say(`  [et] ${line}`) })
       } catch (error) {
-        fail(`EasyTier 下载失败：${error?.message ?? error}。也可以手动装一份放进 ~/.dsh/bot/easytier，或者确认两台机器在同一局域网（那样不需要虚拟网）。`)
+        fail(`EasyTier 下载失败：${error?.message ?? error}。也可以手动装一份放进 ~/.dsh/dsbot-nodes/easytier，或者确认两台机器在同一局域网（那样不需要虚拟网）。`)
       }
       found = await findEasyTier()
       if (found === undefined) {
-        fail('EasyTier 下完了但没找到可执行文件，检查 ~/.dsh/bot/easytier 下的目录结构。')
+        fail('EasyTier 下完了但没找到可执行文件，检查 ~/.dsh/dsbot-nodes/easytier 下的目录结构。')
       }
     }
     say(`加入虚拟网 ${pairCredentials(code).networkName} …`)

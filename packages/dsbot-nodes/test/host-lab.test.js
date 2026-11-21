@@ -30,6 +30,7 @@ async function until(check, { timeoutMs = 4_000, stepMs = 20 } = {}) {
 
 // 一台主机该有的东西：两个群、造 Bot 的能力、把话落进群的能力。
 function makeHostRt({ home, posted }) {
+  process.env.DSBOT_NODES_HOME = home
   const rooms = {
     g1: { id: 'g1', name: '赚钱小组', members: ['chief'] },
     g2: { id: 'g2', name: '写代码', members: ['chief'] },

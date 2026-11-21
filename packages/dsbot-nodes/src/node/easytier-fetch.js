@@ -3,7 +3,7 @@
  * EasyTier 按需下载
  * ============================================================================
  * 仓库不再内置 33MB 的二进制：第一次真正要跨网时，按当前平台从官方 Release
- * 下载一次，缓存在 ~/.dsh/bot/easytier/<版本>/<平台-架构>/，之后直接复用。
+ * 下载一次，缓存在 ~/.dsh/dsbot-nodes/easytier/<版本>/<平台-架构>/，之后直接复用。
  *
  * 三个可调的环境变量（都不需要改代码）：
  *   DSBOT_EASYTIER_DIR     已经手动装好的目录，优先用它，不下载
@@ -14,7 +14,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, cpSync, createWriteStream, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { dataHome } from '../shared/paths.js'
 import { join, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -88,8 +88,7 @@ function writeManifest(dir, entry) {
 }
 
 export function easyTierCacheRoot() {
-  const home = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
-  return join(home, 'easytier')
+  return join(dataHome(), 'easytier')
 }
 
 export function easyTierCacheDir(version = EASYTIER_VERSION, platform = process.platform, arch = process.arch) {

@@ -27,6 +27,7 @@ async function until(check, { timeoutMs = 6_000, stepMs = 25 } = {}) {
 }
 
 function makeHostRt({ home, posted }) {
+  process.env.DSBOT_NODES_HOME = home
   const rooms = { g1: { id: 'g1', name: '赚钱小组', members: ['chief'] } }
   const bots = { chief: { id: 'chief', name: 'Chief' } }
   let seq = 0
