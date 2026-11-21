@@ -38,7 +38,8 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { bindNodeToGroup, forgetNode, unbindNodeFromGroup } from './bind.js'
+import { bindNodeToGroup, forgetNode, renameProxyBot, unbindNodeFromGroup } from './bind.js'
+import { machineNameOf, pickNodeName, shouldRename } from './naming.js'
 import { createAdapterClass, nodeIdOf, routeOf } from './adapter.js'
 import { acceptUpload } from './files.js'
 import { createNodeStore } from './store.js'
@@ -279,10 +280,18 @@ function installOnce(rt) {
           resolve({ nodeId: null, probe: true, groups: [], hostName: 'DSH 主机' })
           return
         }
+        // 名字：用户填的 > 对方的电脑名（hostname）> 老记录 > remote。
+        // 老记录里可能还写着 127.0.0.1（旧版本退到 found.host 留下的），
+        // 既然对方这次报了机器名，就顺手改过来 —— 群里没人想 @ 一个 IP。
+        const reported = String(params.name ?? '').trim()
+        const machine = machineNameOf(params)
+        const nameForRecord = pickNodeName({ reported, machine })
         let record = store.list().find(node => deviceId !== '' && node.deviceId === deviceId)
-        record = record === undefined
-          ? await store.add({ name: String(params.name ?? '') || 'remote', ...(deviceId === '' ? {} : { deviceId }) })
-          : await store.update(record.id, { name: String(params.name ?? record.name) })
+        if (record === undefined) {
+          record = await store.add({ name: nameForRecord, ...(deviceId === '' ? {} : { deviceId }) })
+        } else if (reported !== '' || shouldRename(record.name, nameForRecord)) {
+          record = await store.update(record.id, { name: nameForRecord })
+        }
         const nodeId = record.id
         // workspace 是那台机器自己选的主文件夹。空着就不覆盖已有记录 ——
         // Object.assign 会把 undefined 写上去，落盘时整条字段就没了。
@@ -293,6 +302,11 @@ function installOnce(rt) {
           caps: Array.isArray(params.caps) ? params.caps : [],
           ...(workspace === '' ? {} : { workspace: workspace.slice(0, 400) }),
         })
+
+        // 名字变了（多半是从 127.0.0.1 变成对方的电脑名）：群里那个成员 Bot 跟着改，
+        // 否则设置页写着"小美的电脑"、群里还站着一个 127.0.0.1。
+        await renameProxyBot({ rt, store, nodeId })
+          .catch(error => warn('dsbot-nodes: renaming %s failed: %s', nodeId, error))
 
         // 回执里只给它**自己进了的**群，不是全部群。
         // 给全部的话，远端拿第一个就去发消息 —— 发到它根本不在的群里，主机只能拒，
@@ -1118,6 +1132,12 @@ function registerRoutes(rt, api, hosting) {
         const name = String(body.name ?? '').trim().slice(0, 40)
         if (name === '') return sendJson(res, 400, { ok: false, error: '名字不能是空的' })
         await api.store.update(node.id, { name })
+        // 群里那个成员 Bot 也跟着改：设置页和群成员表不该出现两个名字。
+        try {
+          await renameProxyBot({ rt, store: api.store, nodeId: node.id, force: true })
+        } catch (error) {
+          warn('dsbot-nodes: renaming the bot of %s failed: %s', node.id, error)
+        }
         return sendJson(res, 200, { ok: true, name })
       }
       if (req.method === 'POST' && path === '/api/nodes/join') {

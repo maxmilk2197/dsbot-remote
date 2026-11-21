@@ -171,6 +171,8 @@ export function servePeer(peer, { name, deviceId, cwd, agent, local, llm, inbox 
     method: 'node.hello',
     params: {
       name, deviceId, caps, workspace,
+      // 机器名：主机在没填名字时拿它当默认显示名（host/nodes/naming.js）。
+      hostname: hostname(),
       ...(wanted.length === 0 ? {} : { wantedGroups: wanted }),
       ...(Object.keys(resume).length === 0 ? {} : { cursors: resume }),
     },

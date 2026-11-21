@@ -10,19 +10,21 @@
 //   1) 造一个 model 指向 node: 的 Bot
 //   2) 把这个 Bot 的 id 放进 room.members
 import { nodeIdOf, routeOf } from './adapter.js'
+import { isAddressLike } from './naming.js'
 
 export const proxyModel = nodeId => `${routeOf(nodeId)}/default`
 
 // 名字不能撞车：群里 @ 谁靠名字认人，重名之后 @ 会把话递给两个人。
-const nameTaken = (rt, name) =>
-  Object.values(rt.state?.bots ?? {}).some(bot => bot?.name === name)
+// exceptId：改名时要在"除自己以外"里找，否则自己那个名字永远算撞车。
+const nameTaken = (rt, name, exceptId) =>
+  Object.values(rt.state?.bots ?? {}).some(bot => bot?.name === name && (exceptId === undefined || bot?.id !== exceptId))
 
-const uniqueName = (rt, wanted) => {
+const uniqueName = (rt, wanted, exceptId) => {
   const base = String(wanted ?? '').trim().slice(0, 40) || '远程节点'
-  if (!nameTaken(rt, base)) return base
+  if (!nameTaken(rt, base, exceptId)) return base
   for (let n = 2; n < 100; n += 1) {
     const candidate = `${base.slice(0, 37)} ${n}`
-    if (!nameTaken(rt, candidate)) return candidate
+    if (!nameTaken(rt, candidate, exceptId)) return candidate
   }
   throw Object.assign(new Error(`群里已经有太多叫 ${base} 的 Bot 了`), { code: 'node/bad-params' })
 }
@@ -147,3 +149,27 @@ export async function forgetNode({ rt, store, nodeId }) {
 }
 
 export { nodeIdOf }
+
+/**
+ * 老记录的名字还是 IP（`127.0.0.1`）或 `remote`：对方这次报了机器名，就把它改了。
+ * 只改名，不动 model/groups —— 改的是群里显示的那几个字。
+ */
+export async function renameProxyBot({ rt, store, nodeId, force = false }) {
+  const node = store.node(nodeId)
+  if (node === undefined || node.botId === undefined) return { renamed: false }
+  const bot = rt.botOf?.(node.botId)
+  if (bot === undefined) return { renamed: false }
+  // force：用户自己按了改名，名字是什么就改成什么（不再只看 IP 那种）。
+  if (!force && !isAddressLike(bot.name)) return { renamed: false }
+  const wanted = uniqueName(rt, node.name, bot.id)
+  if (wanted === bot.name) {
+    await store.update(nodeId, { botName: bot.name })
+    return { renamed: false }
+  }
+  const from = bot.name
+  bot.name = wanted
+  await rt.save?.()
+  await store.update(nodeId, { botName: wanted })
+  await store.save?.()
+  return { renamed: true, from, botName: wanted }
+}

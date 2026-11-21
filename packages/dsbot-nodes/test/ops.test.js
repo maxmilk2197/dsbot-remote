@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { connectTcp } from '@dsbot/node-protocol/tcp'
@@ -69,7 +69,7 @@ function makeHostRt({ home, posted }) {
 }
 
 // 一条完整链路：主机起监听，节点连上来并选好工作区。用完一律拆干净。
-async function withPair(fn, { agent } = {}) {
+async function withPair(fn, { agent, name = '手机' } = {}) {
   resetInstall()
   const home = await mkdtemp(join(tmpdir(), 'ops-home-'))
   const workspace = await mkdtemp(join(tmpdir(), 'ops-ws-'))
@@ -107,7 +107,7 @@ async function withPair(fn, { agent } = {}) {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('没等到主机回执')), 5_000)
       ctrl = servePeer(peer, {
-        name: '手机',
+        name,
         deviceId: 'dev-ops-1',
         cwd: workspace,
         wantedGroups: [],
@@ -278,4 +278,21 @@ test('⑦ 遗忘：节点从列表消失，之后派活会被拒', async () => {
     assert.equal(api.list().length, 0)
     await assert.rejects(api.call(node.id, 'node.exec', { execId: 'x', action: 'list_dir', args: { path: '.' } }))
   })
+})
+
+test('⑪ 名字：没填就用对方的电脑名', async () => {
+  await withPair(async ({ node }) => {
+    assert.equal(node.name, hostname(), '对方没报名字时用它的电脑名')
+  }, { name: '' })
+})
+
+test('⑫ 名字：报上来的是 IP 就用电脑名顶掉，群里的成员也跟着叫这个名字', async () => {
+  await withPair(async ({ api, ctrl, node, rt }) => {
+    assert.equal(node.name, hostname(), 'IP 那种名字要换成电脑名')
+    await api.allow({ nodeId: node.id, groups: ['g1'] })
+    await ctrl.want(['g1'])
+    await until(() => node.botId !== undefined)
+    const bot = rt.botOf(api.list()[0].botId)
+    assert.equal(bot.name, hostname(), '群里那个成员也该叫电脑名')
+  }, { name: '127.0.0.1' })
 })
