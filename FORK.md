@@ -134,3 +134,15 @@ pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patch
 所以现在只有一份实现：`packages/dsbot-nodes/src/protocol/`（`index.js` 汇总导出，
 `transport/tcp.js` 与 `transport/discovery.js` 是传输层）。它的 34 个测试跟着搬到了
 `packages/dsbot-nodes/test/protocol-*.test.js`，跑插件测试就一起跑。
+
+
+## 两个 package.json：根是插件入口，子目录是同一份实现
+
+- 根 `package.json`：`name: dsbot-remote`，`dsh.bundle.patch = ./cordis.patch.yml`，带 `dsh.client`，
+  `exports` 指向 `packages/dsbot-nodes/*`，`files` 只打 `packages/dsbot-nodes` 与根上的补丁文件。
+  「添加插件」里粘仓库地址时装的是它（tar 包约 166 KB）。
+- `packages/dsbot-nodes/package.json`：`name: dsbot-nodes`，自带 `cordis.patch.yml`（`name: 'dsbot-nodes'`）。
+  `#path:/packages/dsbot-nodes`、本地 `file:` 与 profile 的 symlink 用的是它。
+
+两个 cordis 补丁各自写自己的包名 —— cordis 是按 `name` 去 node_modules 里 import 的，
+名字对不上就只会在日志里留一句 entry not found，然后插件静悄悄不加载。

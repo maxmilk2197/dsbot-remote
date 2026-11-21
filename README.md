@@ -27,14 +27,22 @@
 
 ## 装插件
 
-在 DSH 的「添加插件」里粘这一行（命令行等价：`dsh plugin add` 或 `pnpm add`）：
+在 DSH 的「添加插件」里粘仓库地址就行（命令行等价：`dsh plugin add` 或 `pnpm add`）：
 
 ```
-https://github.com/maxmilk2197/dsbot-remote#path:/packages/dsbot-nodes
+https://github.com/maxmilk2197/dsbot-remote
 ```
 
-- `#path:/packages/dsbot-nodes` 不能省。仓库根是个 workspace 壳（`private: true`，没有 `dsh` 字段），只填仓库地址装进来的是壳，插件管理器会报"该包没有声明组合包"。
-- 这是 **git 依赖**：那台机器上得有 `git`，装之前先跑 `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。没有 git 就退回到拷目录装：`file:D:/.../dsbot-remote/packages/dsbot-nodes`（整仓库都要拷，别只拷子目录）。
+仓库根就是插件包：`name: dsbot-remote`，带 `dsh.bundle.patch` 与 `dsh.client`，
+`files` 里只打包 `packages/dsbot-nodes` 和根上的 `cordis.patch.yml`（tar 包约 166 KB），
+所以装出来就是一个完整插件，不用再拼 `#path:`。
+
+- 这是 **git 依赖**：那台机器上得有 `git`，装之前先跑
+  `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。
+- 没有 git 的机器，两条替代路：
+  1. 拿打包好的 tgz（`pnpm pack` 出来的 `dsbot-remote-*.tgz` 或仓库里给的），输入框里填它的绝对路径，例如 `C:\Users\me\Downloads\dsbot-remote-0.1.0.tgz`；
+  2. 整仓库拷过去，填插件子目录的绝对路径 `D:\dsbot-remote\packages\dsbot-nodes`（包名 `dsbot-nodes`，跟根包是同一份实现）。
+- 子目录写法 `…/dsbot-remote#path:/packages/dsbot-nodes` 仍然有效，只是不再需要。
 - 装完还要 ds-bot 那一行补丁，见 [FORK.md](FORK.md)；升级 ds-bot 会把它冲掉。
 
 ## 三步用起来
@@ -119,6 +127,7 @@ https://github.com/maxmilk2197/dsbot-remote#path:/packages/dsbot-nodes
 
 | 包 | 作用 |
 | --- | --- |
+| 仓库根（`dsbot-remote`） | 插件入口壳：`dsh.bundle` + `dsh.client` + `exports` 指向 `packages/dsbot-nodes`，装的就是它 |
 | `dsbot-nodes` | 主机侧 cordis 插件：连接管理、`node:` LLM adapter、群绑定、`node_remote` 工具；线协议（信封、方法表、错误码、校验、TCP 传输）内联在 `src/protocol/`，**零运行时依赖** |
 | `dsbot-remote` | 远程侧 CLI：listen/connect、切帧、`exec` 白名单、agent 子进程 |
 
