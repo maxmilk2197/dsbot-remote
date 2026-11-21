@@ -12,11 +12,29 @@ function fakeRt({ bots = 2, rooms = [] } = {}) {
   const state = { bots: {}, rooms: {} }
   for (let index = 0; index < bots; index += 1) state.bots[`b${index}`] = { id: `b${index}`, name: `Bot${index}` }
   for (const room of rooms) state.rooms[room.id] = room
-  const calls = { created: [], logged: [], saved: 0 }
+  const calls = { created: [], logged: [], saved: 0, updated: [], bots: [] }
   const listeners = new Set()
   const rt = {
     state,
     roomOf: id => state.rooms[id],
+    botOf: id => state.bots[id],
+    // 主机成员在本地没有同名 Bot 时，mirror 会造一个替身。
+    createBot: async ({ name, pickModel }) => {
+      const id = `made-${calls.bots.length + 1}`
+      const bot = { id, name, kickoff: pickModel ? '（不该发出去）' : undefined }
+      state.bots[id] = bot
+      calls.bots.push({ id, name, pickModel })
+      return bot
+    },
+    // ds-bot 的 updateRoom：add/remove 落到成员表上。
+    updateRoom: async (id, patch) => {
+      const room = state.rooms[id]
+      const members = [...room.members]
+      for (const member of patch.add ?? []) if (!members.includes(member)) members.push(member)
+      room.members = members.filter(member => !(patch.remove ?? []).includes(member))
+      calls.updated.push({ id, patch })
+      return room
+    },
     createRoom: async ({ members, name, admin }) => {
       calls.created.push({ members, name, admin })
       const room = { id: `room-${calls.created.length}`, name, members: [...members], admin: admin ?? null, seq: 0, log: [] }
@@ -132,6 +150,41 @@ test('不是镜像群的发言不往外发（别把本地别的群搅进来）',
   emitLine(state.rooms.local, { who: '你', text: '本地聊天' })
 
   assert.deepEqual(peer.sent, [])
+})
+
+test('主机给了成员名单：镜像群成员跟着变成同一批 Bot（同名的借，缺的造）', async () => {
+  const { rt, calls, state } = fakeRt()
+  const mirror = createMirror({ rt })
+
+  await mirror.write(
+    {
+      roomId: 'host-1',
+      roomName: '测试',
+      bots: [
+        { id: 'h-chief', name: 'Bot0' },
+        { id: 'h-remote', name: '远程 · PC-20261009GZBT' },
+      ],
+    },
+    [{ seq: 1, who: 'Chief', text: '开干' }],
+  )
+
+  const room = state.rooms['room-1']
+  assert.equal(calls.bots.length, 1, '本地没有同名的，才造一个')
+  assert.equal(calls.bots[0].name, '远程 · PC-20261009GZBT')
+  assert.deepEqual(room.members, ['b0', 'made-1'], '成员表要和主机一样')
+  assert.deepEqual(calls.updated.at(-1).patch.remove, ['b1'], '多出来的旧成员被移出')
+})
+
+test('成员名单没变：不动群，也不反复写盘', async () => {
+  const { rt, calls } = fakeRt()
+  const mirror = createMirror({ rt })
+  const bots = [{ id: 'h0', name: 'Bot0' }, { id: 'h1', name: 'Bot1' }]
+
+  await mirror.write({ roomId: 'host-1', roomName: '测试', bots }, [{ seq: 1, text: '一' }])
+  const before = calls.updated.length
+  await mirror.write({ roomId: 'host-1', roomName: '测试', bots }, [{ seq: 2, text: '二' }])
+
+  assert.equal(calls.updated.length, before, '名单一样就不该再调 updateRoom')
 })
 
 test('连上主机时按群列表批量建镜像群，不用等第一条消息', async () => {

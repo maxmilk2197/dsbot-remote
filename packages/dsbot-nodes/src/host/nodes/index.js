@@ -343,7 +343,7 @@ function installOnce(rt) {
           const mine = (current.groups ?? [])
             .map(id => rt.roomOf?.(id))
             .filter(room => room !== undefined)
-            .map(room => ({ id: room.id, name: room.name || room.id }))
+            .map(room => ({ id: room.id, name: room.name || room.id, bots: groupBotsOf(rt, room) }))
           peer.send({
             id: frame.id,
             result: { proto: 1, ok: true, hostName: 'DSH 主机', hostId: HOST_ID, nodeId, groups: mine, available: allowedGroupsOf(rt, current) },
@@ -460,6 +460,8 @@ function installOnce(rt) {
           lines: tail,
           cursor,
           hostId: HOST_ID,
+          // 每次快照都带一遍名单：成员变了，远端下一次重连就对上了。
+          bots: groupBotsOf(rt, room),
         },
       })
     }
@@ -793,7 +795,7 @@ ${links.join(' ')}`
           // 协议里 room 是对象、cursor 是必填：两个老字段留着兼容旧节点，新的补齐。
           peer.send({
             method: 'group.line',
-            params: { room: { id: room.id, name: roomName }, roomId: room.id, roomName: room.name, cursor: line.seq, hostId: HOST_ID, lines: [line] },
+            params: { room: { id: room.id, name: roomName }, roomId: room.id, roomName: room.name, cursor: line.seq, hostId: HOST_ID, lines: [line], bots: groupBotsOf(rt, room) },
           })
           notePushSent(nodeId, node, line.text)
         } catch (error) {
@@ -1034,6 +1036,9 @@ const readBody = req => new Promise((resolve) => {
 })
 
 // 群列表只有一处真源：ds-bot 的 state.rooms。名字缺失时退回 id，不让界面出现空选项。
+// 群里的 Bot 名单：远端拿它把镜像群的成员对齐成一样的。
+const groupBotsOf = (rt, room) => (room?.members ?? []).map(id => ({ id, name: rt.botOf?.(id)?.name ?? id }))
+
 const listGroups = (rt) => {
   const rooms = rt.state?.rooms
   if (rooms === undefined || rooms === null) return []
@@ -1041,6 +1046,8 @@ const listGroups = (rt) => {
     id: room.id,
     name: room.name || room.id,
     members: (room.members ?? []).length,
+    // 远端镜像群照着这张表建替身：两边的成员列表才长得一样。
+    bots: groupBotsOf(rt, room),
   }))
 }
 

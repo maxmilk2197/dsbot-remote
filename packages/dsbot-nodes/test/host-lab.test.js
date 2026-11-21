@@ -138,6 +138,8 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
     const granted = await ctrl.want(['g1'])
     assert.deepEqual(granted.bound.map(group => group.id), ['g1'])
     assert.deepEqual(granted.available.map(group => group.id), ['g1'])
+    // 回执里带着成员名单：远端镜像群照着它摆替身，两边成员表才一致。
+    assert.equal(granted.available[0].bots.some(bot => bot.id === 'chief' && bot.name === 'Chief'), true)
     await until(() => rt.state.rooms.g1.members.some(id => id !== 'chief'))
     assert.equal(rt.state.rooms.g2.members.length, 1, '没授权的 g2 不该自己进')
     assert.equal(node.botId !== undefined, true)

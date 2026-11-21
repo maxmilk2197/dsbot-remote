@@ -27,7 +27,9 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
   const listeners = new Set()
   // `${hostId}|${主机群 id}` -> { roomId, name, seq }
   // seq 是这个群已经落到本地的最大序号：重连时挡掉重复行，也用来告诉主机从哪接着要。
-  const state = { version: 1, hostId: '', rooms: {} }
+  // bots：主机那边的 Bot id → 本地替身的 id。镜像群的成员表要长得和主机一样，
+  // 所以每个主机成员在本地都要有一个名字相同的 Bot（没有就借同名的，再没有才造）。
+  const state = { version: 1, hostId: '', rooms: {}, bots: {} }
   const file = typeof home === 'string' && home !== '' ? joinPath(home, STATE_FILE) : null
   let peer = null
   let hostId = 'host'
@@ -44,6 +46,11 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       try {
         const raw = JSON.parse(await readFile(file, 'utf8'))
         if (raw !== null && typeof raw === 'object' && typeof raw.hostId === 'string') state.hostId = raw.hostId.slice(0, 64)
+        if (raw !== null && typeof raw === 'object' && raw.bots !== null && typeof raw.bots === 'object') {
+          for (const [key, id] of Object.entries(raw.bots)) {
+            if (typeof id === 'string' && id !== '') state.bots[key] = id
+          }
+        }
         if (raw !== null && typeof raw === 'object' && raw.rooms !== null && typeof raw.rooms === 'object') {
           for (const [key, entry] of Object.entries(raw.rooms)) {
             if (entry === null || typeof entry !== 'object') continue
@@ -154,10 +161,71 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     try { return await job } finally { pending.delete(key) }
   }
 
+  /** 主机某个成员在本地对应的替身 Bot：优先同名，其次新建。 */
+  async function standInFor(hostBotId, name) {
+    const key = `${hostId}|${hostBotId}`
+    const knownId = state.bots[key]
+    if (knownId !== undefined) {
+      const known = rt.botOf?.(knownId)
+      if (known !== undefined) {
+        // 主机那边改名了，这边跟着改 —— 否则成员表又对不上。
+        if (known.name !== name) known.name = name.slice(0, 40)
+        return knownId
+      }
+      delete state.bots[key]
+    }
+    // 本地已经有同名的 Bot 就直接用：镜像群要的是"名单看起来一样"，
+    // 不必为每个主机成员再养一个从不说话的复制品。
+    const sameName = Object.values(rt.state?.bots ?? {}).find(bot => bot?.name === name)
+    if (sameName !== undefined) {
+      state.bots[key] = sameName.id
+      return sameName.id
+    }
+    if (typeof rt.createBot !== 'function') return undefined
+    const created = await rt.createBot({ name: name.slice(0, 40), pickModel: true })
+    delete created.kickoff
+    state.bots[key] = created.id
+    return created.id
+  }
+
+  /**
+   * 把镜像群的成员表对齐主机：主机群里有哪些 Bot，这边就摆哪些替身。
+   * 以前这里随手挑前两个本地 Bot，远端看到的是「Chief / 新 Bot」——
+   * 和主机群里的人完全不是一回事。
+   */
+  async function syncMembers(room, bots) {
+    if (room === undefined || !Array.isArray(bots) || bots.length === 0) return
+    const wanted = []
+    for (const each of bots) {
+      const hostBotId = String(each?.id ?? '')
+      const name = String(each?.name ?? '').trim()
+      if (hostBotId === '' || name === '') continue
+      const local = await standInFor(hostBotId, name)
+      if (local !== undefined && !wanted.includes(local)) wanted.push(local)
+    }
+    if (wanted.length === 0) return
+    const current = room.members ?? []
+    const add = wanted.filter(id => !current.includes(id))
+    // ds-bot 的群至少要有两个成员：主机群本来就够，但只剩一个时宁可留着旧的。
+    const remove = wanted.length >= 2 ? current.filter(id => !wanted.includes(id)) : []
+    if (add.length === 0 && remove.length === 0) return
+    try {
+      await rt.updateRoom?.(room.id, { add, remove })
+      if (add.length > 0 || remove.length > 0) {
+        warn(`镜像群「${room.name}」成员对齐主机：${wanted.length} 人${add.length > 0 ? `，新增 ${add.length}` : ''}${remove.length > 0 ? `，移出 ${remove.length}` : ''}`)
+      }
+      await save()
+    } catch (error) {
+      warn(`镜像群成员同步失败：${error.message}`)
+    }
+  }
+
   /** 把主机推来的消息写进镜像群。只写日志，不触发任何轮次。 */
   async function write(params, lines) {
     const room = await ensure(params)
     if (room === undefined) return { written: 0 }
+    // 每条推送都带一遍成员表：主机那边加了人，这边下一次就跟着变。
+    await syncMembers(room, params?.bots)
     const roomObj = params?.room ?? {}
     const hostRoomId = String(params?.roomId ?? roomObj.id ?? '')
     const key = keyOf(hostRoomId)
@@ -246,7 +314,10 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       const id = String(group.id ?? group.roomId ?? '')
       if (id === '') continue
       const room = await ensure({ roomId: id, roomName: group.name ?? group.roomName })
-      if (room !== undefined) made += 1
+      if (room !== undefined) {
+        await syncMembers(room, group.bots)
+        made += 1
+      }
     }
     return made
   }
