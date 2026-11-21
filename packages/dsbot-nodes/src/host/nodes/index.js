@@ -36,6 +36,7 @@ try {
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { bindNodeToGroup, forgetNode, renameProxyBot, unbindNodeFromGroup } from './bind.js'
@@ -72,13 +73,16 @@ const VERSION = (() => {
   }
 })()
 
+// 版本号只在开头写一次：以前每行都挂一个 · v0.1.3，贴二十行日志有二十份噪音。
 function bootNote(text) {
-  appendLog(`${new Date().toISOString()} ${text} · v${VERSION}`)
+  appendLog(`${new Date().toISOString()} ${text}`)
 }
 
-bootNote('module imported')
+bootNote(`=== dsbot-remote v${VERSION} ===`)
 bootNote(`env node=${process.versions.node} platform=${platform()} arch=${process.arch} pid=${process.pid}`)
-bootNote(`data dir ${dataHome()}  log ${logFile()}`)
+bootNote(`data dir ${dataHome()}`)
+bootNote(`log ${logFile()}`)
+bootNote('module imported')
 
 // DSH 会把同一个插件装进好几个上下文：日志里一次热重载能看到 install 连跑七遍。
 // 每遍都新建一个 store、抢一次 7777、往 teamTools 里推一份工具、挂一份路由 ——
@@ -91,6 +95,30 @@ bootNote(`data dir ${dataHome()}  log ${logFile()}`)
 // 模块级变量做不到这件事：热重载会把它连同整个模块换掉，而旧实例开的端口还在。
 const MODULE_ID = newModuleId()
 bootNote(`module loaded (${MODULE_ID})`)
+
+// "等不到 bot 服务"这条线上最费时间的问题：日志只说明缺补丁，却不说**哪份**
+// ds-bot 被加载、它到底有没有那一行。profile 里装过好几个版本、升级留下老目录时，
+// 用户照着文档补了 A，跑起来的却是 B。这里在启动时就把答案写进日志。
+function describeDsbot() {
+  try {
+    const req = createRequire(import.meta.url)
+    const entry = req.resolve('ds-bot')
+    let version = 'unknown'
+    for (const guess of ['ds-bot/package.json', join(dirname(entry), 'package.json')]) {
+      try { version = JSON.parse(readFileSync(req.resolve(guess), 'utf8')).version ?? version; break } catch {}
+    }
+    let patched
+    try {
+      const source = readFileSync(entry, 'utf8')
+      patched = /provide\(\s*['"]bot['"]/.test(source) ? "有 ctx.provide('bot')" : "缺 ctx.provide('bot', rt)"
+    } catch (error) {
+      patched = `读不到入口（${error?.message ?? error}）`
+    }
+    return { version, entry, patched, short: `ds-bot v${version} ${patched}`, text: `ds-bot v${version} ${patched} · ${entry}` }
+  } catch (error) {
+    return { version: 'unknown', entry: '', patched: '解析不到', short: 'ds-bot 解析不到', text: `ds-bot 解析不到：${error?.message ?? error}` }
+  }
+}
 
 export function install(rt) {
   const claimed = claimInstance(MODULE_ID, () => installOnce(rt), message => bootNote(`guard ${message}`))
@@ -652,7 +680,10 @@ ${links.join(' ')}`
   // "no adapter registered for provider node:n-xxxx"；模型列表也一起空着，
   // ds-bot 转头就让 Bot 说"default 已经不可用了"。
   void store.load()
-    .then(() => syncRoutes())
+    .then(() => {
+      syncRoutes()
+      bootNote(`install: 节点记录 ${store.list().length} 条，LLM 路由 ${store.list().length} 条`)
+    })
     .catch(error => warn('dsbot-nodes: 读节点记录失败：%s', error?.message ?? error))
 
   // 主机自己的那一半：开端口、给配对码、应答局域网问询。装上就已经在等，
@@ -663,7 +694,14 @@ ${links.join(' ')}`
     warn: message => warn(message),
     hostName: 'DSH 主机',
   })
-  void hosting.start().catch(error => warn(`远程节点监听没起来：${error.message}`))
+  void hosting.start()
+    .then((state) => {
+      bootNote(`install: 监听 ${state?.port ?? '?'}（配对码${state?.code ? '已生成' : '没生成'}，虚拟网${state?.network?.on ? '已接入' : '未接入'}${state?.network?.error ? `：${state.network.error}` : ''}）`)
+    })
+    .catch(error => {
+      bootNote(`install: 监听没起来（${error?.message ?? error}）`)
+      warn(`远程节点监听没起来：${error.message}`)
+    })
 
   // 心跳看门狗：对面 15 秒一条 node.presence，75 秒一帧都没有就当它掉了。
   // 电脑合盖、进程被杀、网线拔掉这几种情况 TCP 不会立刻断，光等 close 会让群里
@@ -1375,6 +1413,7 @@ function registerTool(rt, api, resolveNode) {
   // tools 服务，而且那样只有 Main Bot 看得见。
   const viaTeam = Array.isArray(rt.teamTools)
   if (!viaTeam && ctx?.tools?.register === undefined) return
+  bootNote(`install: 工具 node_remote 注册到 ${viaTeam ? 'rt.teamTools' : 'ctx.tools'}`)
   const tool = defineTool({
     name: 'node_remote',
     description: [
@@ -1588,12 +1627,13 @@ function applyPlugin(ctx, config = {}) {
   // "什么都没发生"。改成运行时订阅——先证明插件活着，再等 ds-bot 把 runtime 挂上来。
   let depsReady = false
   let attachTries = 0
+  const applyAt = Date.now()
   const attach = () => {
     attachTries += 1
     const startedAt = Date.now()
-    bootNote(`attach #${attachTries}: 订阅 bot 服务`)
+    bootNote(`attach #${attachTries}: 订阅 bot 服务（apply 后 ${startedAt - applyAt}ms，depsReady=${depsReady}）`)
     ctx.inject(['bot', 'llm'], (sub) => {
-      bootNote(`deps ready（第 ${attachTries} 次订阅，等了 ${Date.now() - startedAt}ms）`)
+      bootNote(`deps ready（attach #${attachTries}，这次等了 ${Date.now() - startedAt}ms，累计 ${Date.now() - applyAt}ms）`)
       depsReady = true
       // 插件自己出问题可以少个功能，但绝不能把整个 DSH 带走。
       // 之前这里没兜：cordis 在某些时序下给出的 context 已经失效，install 里建
@@ -1631,7 +1671,12 @@ function applyPlugin(ctx, config = {}) {
         // attach() 只是再订一次 'bot'：服务真来了就会走 install 挂正式路由。
         // 走 routeState 里那份，热重载后这里拿到的是新实例的 attach。
         const holder = routeState().early
-        bootNote('POST /mount：再催一次挂载')
+        const holderState = routeState()
+        if (holderState.early !== null && holderState.early !== undefined) {
+          holderState.early.tries = (holderState.early.tries ?? 0) + 1
+        }
+        const dsbot = describeDsbot()
+        bootNote(`POST /mount：第 ${holderState.early?.tries ?? 1} 次催挂载（depsReady=${depsReady}；${dsbot.short}）`)
         try { (holder?.attach ?? attach)() } catch { /* attach 内部自己记日志 */ }
         return sendJson(res, 200, { ok: true, trying: true })
       }
@@ -1641,7 +1686,8 @@ function applyPlugin(ctx, config = {}) {
           pending: true,
           reason: depsReady
             ? '正在挂载，几秒后再刷新'
-            : "还没等到 bot 服务：ds-bot 缺 ctx.provide('bot', rt) 这一行补丁（升级 ds-bot 会冲掉）",
+            : "还没等到 bot 服务：ds-bot 缺 ctx.provide('bot', rt) 这一行补丁（升级 ds-bot 会冲掉）。"
+              + `实际加载的那份：${describeDsbot().text}`,
           hosting: false,
           code: null,
           port: null,
@@ -1690,9 +1736,11 @@ function applyPlugin(ctx, config = {}) {
   const waitForDeps = ms => {
     const timer = setTimeout(() => {
       if (depsReady) return
+      const dsbot = describeDsbot()
       bootNote('等不到 bot 服务：ds-bot 需要 ctx.provide(\'bot\', rt) 这一行补丁，'
         + '升级 ds-bot 后要重新应用（pnpm.patchedDependencies → patches/ds-bot@*.patch）。'
-        + '远程节点功能不可用，DSH 其余部分不受影响')
+        + `实际加载的那份：${dsbot.text}`
+        + '。远程节点功能不可用，DSH 其余部分不受影响')
     }, ms)
     timer.unref?.()
     return timer

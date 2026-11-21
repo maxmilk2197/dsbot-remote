@@ -1,6 +1,6 @@
 // 本文件由 AI 生成，请勿用于生产环境。
-// 启动日志每行带版本号：用户贴一段日志过来时，第一件要确认的事就是"那台机器装的是
-// 哪一版"。没版本号只能靠猜，或者再去翻 package.json。
+// 版本号写在开头的横幅里，一行就够：以前每行都挂，二十行日志二十份噪音。
+// 用户贴一段日志过来时，第一眼要看到的是"装的哪一版"。
 // 日志放在插件自己的目录（~/.dsh/dsbot-nodes/logs/），不寄生在 ds-bot 的 ~/.dsh/bot/。
 process.env.DSBOT_NODES_TEST = '1'
 import assert from 'node:assert/strict'
@@ -21,16 +21,19 @@ const bootOnce = home => promisify(execFile)(process.execPath, ['-e', `import(${
   timeout: 20_000,
 })
 
-test('启动日志每行都带版本号，并写清运行环境', async () => {
+test('启动日志开头写版本与环境，且版本不再逐行重复', async () => {
   // 换个子进程：日志在模块 import 时就写了，本进程里已经写过一轮，分不清是新的。
   const home = await mkdtemp(join(tmpdir(), 'boot-'))
   try {
     await bootOnce(home)
     const log = await readFile(join(logsOf(home), 'current.log'), 'utf8')
-    assert.match(log, /module imported · v\d+\.\d+\.\d+/)
-    assert.ok(log.includes('· v' + version), '日志里没有当前版本 ' + version)
-    assert.match(log, /env node=\d+/)
+    assert.ok(log.includes('=== dsbot-remote v' + version + ' ==='), '日志里没有当前版本 ' + version)
+    assert.match(log, /env node=[\d.]+ platform=\w+ arch=\w+ pid=\d+/)
     assert.match(log, /data dir /)
+    assert.match(log, /^\S+ log .*current\.log$/m)
+    // 只在横幅里出现一次
+    assert.equal(log.split('=== dsbot-remote v').length - 1, 1)
+    assert.ok(!/ · v\d+\.\d+\.\d+$/m.test(log), '不该每行都追加版本号')
     // 不再往 ds-bot 的家目录里写
     const botDir = await readdir(join(home, 'bot')).catch(() => [])
     assert.deepEqual(botDir, [])
