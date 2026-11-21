@@ -67,3 +67,16 @@ test('等不到 bot 服务时，设置页显示原因和「立即挂载」', () 
   // 没挂上时不要再显示一串占位配对码，那会让人以为码是坏的
   assert.match(source, /state\?\.pending \? null : card\(\[/)
 })
+
+// 选主文件夹要用宿主自带的对话框（Windows 上是系统文件夹选择，能翻别的盘）。
+// 自制列表只能当兜底：宿主没有 uiWorkspace、或者它抛错时才出现。
+test('浏览器选文件夹优先用宿主的目录选择器', () => {
+  assert.match(source, /ctx\.inject\(\['uiWorkspace'\]/)
+  assert.match(source, /hostWorkspace\.pickDirectory\(\)/)
+  assert.match(source, /const result = await pickWithHost\(\)/)
+  assert.match(source, /result\.kind === 'picked'/)
+  // 取消不算失败，不能掉进自制列表
+  assert.match(source, /result\.kind === 'cancelled'\) return/)
+  // 兜底还在
+  assert.match(source, /setBrowsing\(true\)/)
+})

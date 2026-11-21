@@ -43,6 +43,27 @@
     const ModalInner = wrap(primitives.Modal, 'div')
     const Modal = props => (props.open === true ? ModalInner(props) : null)
 
+    // DSH 自带的目录选择器（Windows 上是系统文件夹对话框，能翻到别的盘；远程 authority 下是
+    // 内置浏览面板）。由 apply() 里的 ctx.inject(['uiWorkspace']) 填进来。
+    // 拿不到就退回本文件下面那个只列目录的 FolderPicker —— 别让它把整页卡住。
+    let hostWorkspace = null
+    const pickWithHost = async () => {
+      const pick = hostWorkspace !== null && typeof hostWorkspace.pickDirectory === 'function'
+        ? () => hostWorkspace.pickDirectory()
+        : null
+      if (pick === null) return { kind: 'unavailable' }
+      try {
+        const picked = await pick()
+        if (typeof picked !== 'string' || picked.trim() === '') return { kind: 'cancelled' }
+        return { kind: 'picked', path: picked }
+      } catch (error) {
+        // 取消在这条链路上是抛错（directory picker failed: canceled），不是返回值 —— 别弹自制列表。
+        const message = String(error?.message ?? error ?? '')
+        if (/cancel|abort|取消|关闭/i.test(message)) return { kind: 'cancelled' }
+        return { kind: 'unavailable', reason: message }
+      }
+    }
+
     // 渲染出错时把错误摊在页面上，而不是整块留白 —— 白屏只能靠猜。
     class Boundary extends React.Component {
       constructor(props) {
@@ -225,6 +246,19 @@
 
       const toggle = id => setPicked(prev => (prev.includes(id) ? prev.filter(each => each !== id) : [...prev, id]))
 
+      // 「浏览…」先问宿主：它能开系统对话框（任意盘符）。宿主没有这个服务、或它坏了，才落到自制列表。
+      const browse = async () => {
+        const result = await pickWithHost()
+        if (result.kind === 'picked') {
+          setFolder(result.path)
+          setBrowsing(false)
+          return
+        }
+        if (result.kind === 'cancelled') return
+        if (typeof result.reason === 'string' && result.reason !== '') setError('系统的选目录对话框没打开：' + result.reason)
+        setBrowsing(true)
+      }
+
       const save = async () => {
         setBusy(true)
         setError('')
@@ -279,7 +313,7 @@
               onChange: event => setFolder(event.target.value),
               style: { flex: '1 1 260px' },
             }),
-            Button({ children: '浏览…', onClick: () => setBrowsing(true) }),
+            Button({ children: '浏览…', onClick: () => { void browse() } }),
           ]),
 
           error === '' ? null : note(error),
@@ -787,6 +821,14 @@
     return {
       inject: ['slots'],
       apply(ctx) {
+        // 只订这一个服务；缺了不影响本插件激活（settings.section 照常注册，浏览退回自制列表）。
+        try {
+          ctx.inject(['uiWorkspace'], sub => {
+            hostWorkspace = sub.uiWorkspace ?? null
+          })
+        } catch (error) {
+          console.warn('dsbot-nodes: 拿不到宿主的目录选择器，浏览改用自制列表', error)
+        }
         const slots = ctx.get('slots')
         if (slots === undefined) return
         slots.inject('settings.section', () => slots.register(
