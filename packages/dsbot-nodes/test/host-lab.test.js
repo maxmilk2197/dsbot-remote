@@ -37,8 +37,14 @@ function makeHostRt({ home, posted }) {
   }
   const bots = { chief: { id: 'chief', name: 'Chief' } }
   const listeners = new Set()
+  // 人以「用户」身份说的话走这里（ds-bot 的 sendUser）。
+  const users = []
   let seq = 0
   return {
+    users,
+    async sendUser({ sessionId, content }) {
+      users.push({ sessionId, text: (content ?? []).map(part => part?.text ?? '').join('') })
+    },
     home,
     readOnly: () => false,
     warn: () => {},
@@ -151,12 +157,22 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
     assert.deepEqual(wanted.refused.map(group => group.id), ['nope'])
     assert.equal(rt.state.rooms.g2.members.length, 2)
 
-    // 5) 加入端直接说话：以它那个成员的身份落进群里。
+    // 5) 加入端直接说话：没带身份的是人，走用户入口，不被压成成员。
     await ctrl.say('这边跑完了，三个测试全过', 'g2')
-    assert.equal(posted.length, 1)
-    assert.equal(posted[0].group, 'g2')
-    assert.equal(posted[0].bot, node.botId)
-    assert.equal(posted[0].text, '这边跑完了，三个测试全过')
+    assert.equal(rt.users.length, 1, '人说的话要走 rt.sendUser')
+    assert.equal(rt.users[0].sessionId, 'g2')
+    assert.equal(rt.users[0].text, '这边跑完了，三个测试全过')
+    assert.equal(posted.length, 0, '不该再以成员身份落群')
+
+    // 5b) 带 botId 的转述：按那个成员的身份落群；编出来的身份明确拒绝，不换脸。
+    const frames = []
+    peer.on('frame', frame => frames.push(frame))
+    peer.send({ id: 'rpc-1', method: 'node.post', params: { groupId: 'g1', botId: 'chief', text: '以 Chief 名义说' } })
+    await until(() => posted.some(entry => entry.text === '以 Chief 名义说'))
+    assert.equal(posted.at(-1).bot, 'chief', '带身份的转述要按那个成员落群')
+    peer.send({ id: 'rpc-2', method: 'node.post', params: { groupId: 'g1', botId: 'nobody', text: '冒充一个不存在的人' } })
+    await until(() => frames.some(frame => frame.id === 'rpc-2'))
+    assert.equal(frames.find(frame => frame.id === 'rpc-2').error.code, 'node/not-found')
 
     // 6) 收回授权：立刻从群里拿掉，之后也不能再往那儿说话。
     await api.allow({ nodeId: node.id, groups: ['g1'] })

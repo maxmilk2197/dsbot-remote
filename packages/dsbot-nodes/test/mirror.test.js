@@ -62,14 +62,15 @@ const fakePeer = () => {
 }
 
 test('主机推来一条消息：本地建同名群，写进去，且不派活给本地 Bot', async () => {
-  const { rt, calls } = fakeRt()
+  const { rt, calls, state } = fakeRt()
   const mirror = createMirror({ rt })
 
   const result = await mirror.write({ roomId: 'host-1', roomName: '测试' }, [{ who: 'Chief', text: '开干' }])
 
   assert.equal(calls.created.length, 1, '应该建了一个群')
   assert.equal(calls.created[0].name, mirrorName('测试'))
-  assert.equal(calls.created[0].admin, null, '没有 admin，普通消息才不会派给成员')
+  assert.equal(calls.created[0].admin, null, '建群时不带 admin')
+  assert.equal(state.rooms['room-1'].mirror, true, '镜像群必须有 mirror 标记：ds-bot 见到它就不派活')
   assert.equal(result.written, 1)
   assert.deepEqual(calls.logged[0].line.mirror, true, '写进去的行要带 mirror 标记')
   assert.equal(calls.logged[0].line.who, 'Chief')
@@ -221,6 +222,32 @@ test('成员名单没变：不动群，也不反复写盘', async () => {
   await mirror.write({ roomId: 'host-1', roomName: '测试', bots }, [{ seq: 2, text: '二' }])
 
   assert.equal(calls.updated.length, before, '名单一样就不该再调 updateRoom')
+})
+
+test('重启后照进度文件认回镜像群：用户先说一句，照样能回传', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsbot-mirror-'))
+  try {
+    const first = fakeRt()
+    const before = createMirror({ rt: first.rt, home: dir })
+    before.setHost('host-a')
+    await before.write({ roomId: 'host-1', roomName: '测试' }, [{ seq: 1, who: 'Chief', text: '之前' }])
+
+    // 新进程：群还在（ds-bot 的 state 里有），但内存里没有 mirrors。
+    const second = fakeRt({ rooms: Object.values(first.state.rooms) })
+    const after = createMirror({ rt: second.rt, home: dir })
+    after.setHost('host-a')
+    await after.load()
+    const peer = fakePeer()
+    after.bind(peer)
+
+    second.emitLine(second.state.rooms['room-1'], { who: '你', text: '我先说一句' })
+
+    assert.equal(peer.sent.length, 1, '不等主机推一条，也要认得这是镜像群')
+    assert.deepEqual(peer.sent[0].params, { groupId: 'host-1', text: '我先说一句' })
+    assert.equal(second.state.rooms['room-1'].mirror, true, '认回来的时候顺手打上镜像标记')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('连上主机时按群列表批量建镜像群，不用等第一条消息', async () => {

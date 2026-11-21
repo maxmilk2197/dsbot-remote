@@ -128,6 +128,17 @@ pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patch
 
 pnpm 补丁（上一节）仍然保留：它让 `pnpm install` 之后立刻就是对的；自补负责兜住"补丁对不上版本"和"手动更新冲掉补丁"这两种情况。
 
+### 镜像群为什么要改 ds-bot 的 openingCall
+
+`groups.js` 的 `openingCall(room, opener)` 决定一条消息要叫醒谁：`room.mode === 'admin'` 且有 admin 时只叫 admin，
+否则把 `room.members` 全部叫起来（`admin: null` 的群因此是全员齐发）。镜像群的替身 Bot 一旦被叫醒，
+就会拿**本机的模型**替主机的人回答，主机群于是看到三条回复全挂在同一个远程 Bot 名下。
+
+`selfpatch.js` 的 `ensureDsbotQuiet()` 在 `function openingCall(room, opener) {` 之后插一行：
+`if (room.mirror === true) return { speakers: [], ordered: false }` —— 打了 `mirror` 标记的房间不派人。
+镜像群建立/认回时由 `mirror.js` 的 `markMirror(room)` 打这个标记（写在 ds-bot 的 state.json 里，重启后还在）。
+备份 `*.bak-dsbot-mirror`；`DSBOT_NODES_SELFPATCH=0` 一并关掉。
+
 ## 从 GitHub 装：线协议为什么并进了插件
 
 这个插件要能"粘仓库地址就装"（`…/dsbot-remote#path:/packages/dsbot-nodes`）。

@@ -489,8 +489,8 @@ function installOnce(rt) {
 
   // ---- 入站帧 ----
 
-  // 远端主动插话：以它在群里那个 Bot 的身份把这句话写进群。
-  // 和主机自己发消息走同一条路（rt.postToRoom），所以群里的轮次、@、存档都一致。
+  // 远端主动插话：人说的话按「用户」写进群（rt.sendUser，和小窗里发消息同一条路），
+  // 带着 botId 转述的才以那个成员的身份落群（rt.postToRoom）。
   const postFromNode = async (nodeId, frame) => {
     const peer = peers.get(nodeId)
     const answer = payload => { if (frame.id !== undefined) peer?.send({ id: frame.id, ...payload }) }
@@ -534,8 +534,13 @@ function installOnce(rt) {
     // 身份：远端这句话是谁说的？
     //   params.botId —— 主机这边的成员 id（远端替身 Bot 转述时带）
     //   没有 botId  —— 人。他在镜像群里打的字，在主机群里也该显示成他打的。
-    const asBot = typeof params.botId === 'string' && params.botId !== '' ? rt.botOf?.(params.botId) : undefined
-    if (asBot !== undefined && (room.members ?? []).includes(asBot.id) && typeof rt.postToRoom === 'function') {
+    if (typeof params.botId === 'string' && params.botId !== '') {
+      // 带了身份就必须按那个身份落群。以前找不到成员会悄悄退化成「用户发言」，
+      // 一条 Bot 的消息就变成了人说的 —— 宁可报错，也不要换一张脸。
+      const asBot = rt.botOf?.(params.botId)
+      if (asBot === undefined) { refuse('node/not-found', `主机这边没有这个成员：${params.botId}`); return }
+      if (!(room.members ?? []).includes(asBot.id)) { refuse('node/denied', `${asBot.name ?? params.botId} 不在「${room.name}」里`); return }
+      if (typeof rt.postToRoom !== 'function') { refuse('node/unsupported', '这个版本的 ds-bot 不支持代发'); return }
       const posted = await rt.postToRoom(room, asBot, text)
       answer({ result: { ok: true, groupId: room.id, at: Date.now(), seq: posted?.seq ?? posted?.record?.seq } })
       return
@@ -546,12 +551,20 @@ function installOnce(rt) {
     if (typeof rt.sendUser === 'function') {
       try {
         await rt.sendUser({ sessionId: room.id, content: [{ type: 'text', text }] })
+        answer({ result: { ok: true, groupId: room.id, at: Date.now(), seq: rt.roomOf?.(room.id)?.seq } })
+        return
       } catch (error) {
+        // 用户入口被占住（那一轮正忙、会话已经停了）时不能把话吞掉：退回成员身份落群，
+        // 群里至少看得到。两条路都不成才拒绝，并写清是哪一步失败的。
+        warn('dsbot-nodes: 用用户身份发进「%s」失败，退回成员身份：%s', room.name, error?.message ?? error)
+        if (typeof rt.postToRoom === 'function') {
+          const posted = await rt.postToRoom(room, bot, text)
+          answer({ result: { ok: true, groupId: room.id, at: Date.now(), seq: posted?.seq ?? posted?.record?.seq, fallback: 'bot' } })
+          return
+        }
         refuse('node/failed', `主机没把这句话发进群：${error?.message ?? error}`)
         return
       }
-      answer({ result: { ok: true, groupId: room.id, at: Date.now() } })
-      return
     }
     if (typeof rt.postToRoom !== 'function') {
       refuse('node/unsupported', '这个版本的 ds-bot 不支持代发')

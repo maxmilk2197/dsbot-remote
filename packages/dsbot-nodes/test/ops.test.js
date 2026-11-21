@@ -30,8 +30,14 @@ function makeHostRt({ home, posted }) {
   process.env.DSBOT_NODES_HOME = home
   const rooms = { g1: { id: 'g1', name: '赚钱小组', members: ['chief'] } }
   const bots = { chief: { id: 'chief', name: 'Chief' } }
+  // 人以「用户」身份说的话走这里；和 ds-bot 的 sendUser 同一个形状。
+  const users = []
   let seq = 0
   return {
+    users,
+    async sendUser({ sessionId, content }) {
+      users.push({ sessionId, text: (content ?? []).map(part => part?.text ?? '').join('') })
+    },
     home,
     readOnly: () => false,
     warn: () => {},
@@ -119,7 +125,7 @@ async function withPair(fn, { agent, name = '手机' } = {}) {
     })
     const [node] = api.list()
     assert.equal(node.workspace, workspace)
-    await fn({ api, ctrl, node, posted, peer, rt, workspace, home, hosted })
+    await fn({ api, ctrl, node, posted, peer, rt, users: rt.users, workspace, home, hosted })
   } finally {
     try { peer.close() } catch {}
     try { await api.hosting.stop?.() } catch {}
@@ -129,7 +135,7 @@ async function withPair(fn, { agent, name = '手机' } = {}) {
 }
 
 test('① 配对 + ② 发言：授权后进群，说一句落到群里', async () => {
-  await withPair(async ({ api, ctrl, node, posted, rt }) => {
+  await withPair(async ({ api, ctrl, node, posted, users, rt }) => {
     assert.equal(api.list().length, 1, '主机要认得这台机器')
     const denied = await ctrl.want(['g1'])
     assert.deepEqual(denied.bound, [], '没授权就进不去')
@@ -140,9 +146,11 @@ test('① 配对 + ② 发言：授权后进群，说一句落到群里', async 
     await until(() => rt.state.rooms.g1.members.some(id => id !== 'chief'))
 
     await ctrl.say('这边跑完了', 'g1')
-    assert.equal(posted.length, 1)
-    assert.equal(posted[0].bot, node.botId)
-    assert.equal(posted[0].text, '这边跑完了')
+    // 没带身份的是人：走 ds-bot 的用户入口，群里显示成用户，主机成员照常回应。
+    assert.equal(users.length, 1)
+    assert.equal(users[0].sessionId, 'g1')
+    assert.equal(users[0].text, '这边跑完了')
+    assert.equal(posted.length, 0, '不该再被压成成员身份')
   })
 })
 

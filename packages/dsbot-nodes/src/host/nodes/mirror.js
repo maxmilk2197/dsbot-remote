@@ -85,6 +85,13 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
               name: String(entry.name ?? ''),
               seq: Number.isFinite(seq) && seq > 0 ? seq : 0,
             }
+            // 进度文件里的群如果本地还在，直接登记回来：重启之后用户先在镜像群说一句话，
+            // 那句也要能回传，不能等主机先推一条才认识这个群。
+            const found = localRoom(roomId)
+            if (found !== undefined) {
+              mirrors.set(key, found.id)
+              markMirror(found)
+            }
           }
         }
       } catch (error) {
@@ -130,6 +137,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     const known = localRoom(mirrors.get(key) ?? state.rooms[key]?.roomId)
     if (known !== undefined) {
       mirrors.set(key, known.id)
+      markMirror(known)
       return known
     }
     // hello 回执和 group.snapshot 可能同时触发同一个群，不能建出两个。
@@ -155,6 +163,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       const existing = rooms().find(room => room.name === wanted && !taken.has(room.id))
       if (existing !== undefined) {
         mirrors.set(key, existing.id)
+        markMirror(existing)
         state.rooms[key] = { roomId: existing.id, name: existing.name, seq: state.rooms[key]?.seq ?? 0 }
         await save()
         return existing
@@ -177,6 +186,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
         admin: null,
       })
       mirrors.set(key, room.id)
+      markMirror(room)
       state.rooms[key] = { roomId: room.id, name: room.name ?? wanted, seq: state.rooms[key]?.seq ?? 0 }
       await save()
       warn(`建好镜像群「${room.name}」`)
@@ -225,7 +235,14 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       const hostBotId = String(each?.id ?? '')
       const name = String(each?.name ?? '').trim()
       if (hostBotId === '' || name === '') continue
-      const local = await standInFor(hostBotId, name)
+      // 造替身要选模型、写盘，可能失败。一个成员没造出来不该让整条推送一起丢掉 ——
+      // 少一个人也比群消息一条都写不进去强。
+      let local
+      try {
+        local = await standInFor(hostBotId, name)
+      } catch (error) {
+        warn(`镜像群的那个成员没造出来（${name}）：${error?.message ?? error}`)
+      }
       if (local !== undefined && !wanted.includes(local)) wanted.push(local)
     }
     if (wanted.length === 0) return
@@ -262,7 +279,7 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
       const text = String(line?.text ?? '')
       if (text === '') continue
       // 自己刚从这边发出去的话被主机推回来了：跳过，群里不多一份。
-      if (line?.botId === undefined && line?.kind === undefined && takeSent(text)) { stale += 1; continue }
+      if (line?.botId === undefined && line?.kind === undefined && takeSent(text.trim())) { stale += 1; continue }
       const seq = Number(line?.seq)
       const sequenced = Number.isFinite(seq) && seq > 0
       // 快照会把最后一段重发一遍：序号不比水位新的，本地已经有了。
