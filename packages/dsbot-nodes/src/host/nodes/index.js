@@ -1628,8 +1628,21 @@ function applyPlugin(ctx, config = {}) {
   let depsReady = false
   let attachTries = 0
   const applyAt = Date.now()
+  let watching = false
   const attach = () => {
     attachTries += 1
+    // 一次只订一个服务，用来分辨"到底缺哪个"：bot 到了 llm 没到，和两个都没到，
+    // 处理方式完全不同（前者几乎不可能，后者就是 ds-bot 补丁没上）。
+    if (!watching) {
+      watching = true
+      for (const service of ['bot', 'llm']) {
+        try {
+          ctx.inject([service], () => bootNote(`服务到位: ${service}（apply 后 ${Date.now() - applyAt}ms）`))
+        } catch (error) {
+          bootNote(`订阅 ${service} 失败: ${error?.message ?? error}`)
+        }
+      }
+    }
     const startedAt = Date.now()
     bootNote(`attach #${attachTries}: 订阅 bot 服务（apply 后 ${startedAt - applyAt}ms，depsReady=${depsReady}）`)
     ctx.inject(['bot', 'llm'], (sub) => {
