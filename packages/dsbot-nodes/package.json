@@ -1,6 +1,6 @@
 {
   "name": "dsbot-nodes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSBot Remote Nodes 主机侧：把远程节点挂成 model=node:<id> 的执行器。开发期独立，最终并进 ds-bot fork。 （AI 生成，请勿用于生产环境 / AI-generated, not for production use）",
   "type": "module",
   "exports": {

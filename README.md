@@ -42,11 +42,11 @@ https://github.com/maxmilk2197/dsbot-remote
   一样是「输入框里贴一行」：
 
   ```
-  https://raw.githubusercontent.com/maxmilk2197/dsbot-remote/main/dist/dsbot-remote-0.1.0.tgz
+  https://raw.githubusercontent.com/maxmilk2197/dsbot-remote/main/dist/dsbot-remote-0.1.1.tgz
   ```
 
   大陆网络 raw 不通时换 CDN 镜像：
-  `https://cdn.jsdelivr.net/gh/maxmilk2197/dsbot-remote@main/dist/dsbot-remote-0.1.0.tgz`。
+  `https://cdn.jsdelivr.net/gh/maxmilk2197/dsbot-remote@main/dist/dsbot-remote-0.1.1.tgz`。
   两条都实测过：`pnpm add` 2 秒装完，入口、`dsh.bundle.patch` 都在。
 - 上面那条 git 地址要求机器上有 `git`，装之前先跑
   `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。
@@ -54,6 +54,10 @@ https://github.com/maxmilk2197/dsbot-remote
   1. 拿打包好的 tgz（`pnpm pack` 出来的 `dsbot-remote-*.tgz` 或仓库里给的），输入框里填它的绝对路径，例如 `C:\Users\me\Downloads\dsbot-remote-0.1.0.tgz`；
   2. 整仓库拷过去，填插件子目录的绝对路径 `D:\dsbot-remote\packages\dsbot-nodes`（包名 `dsbot-nodes`，跟根包是同一份实现）。
 - 子目录写法 `…/dsbot-remote#path:/packages/dsbot-nodes` 仍然有效，只是不再需要。
+- **包名要和 `client.js` 注册的模块 id 对上**：web 启动时按 cordis 条目名（= 装出来的包名）
+  去 `__ModuleLoader__` 里找模块，找不到就整机卡在
+  `web boot: 1 entry did not activate / <包名>: import failed`。所以 `client.js` 里
+  两个名字都注册了（`dsbot-nodes`、`dsbot-remote`），再改包名记得同步那里。
 - 装完还要 ds-bot 那一行补丁，见 [FORK.md](FORK.md)；升级 ds-bot 会把它冲掉。
 
 ## 三步用起来

@@ -8,9 +8,21 @@
  * 控件一律用宿主的设计系统（Button / Input / Modal / Tag），这里只写排布
  * （flex / gap / margin），不写颜色、边框、字号 —— 主题换了它跟着换。
  */
-window.__ModuleLoader__.load({
-  id: 'dsbot-nodes',
-  factory: (require) => {
+;(function registerClientModule() {
+  // 模块 id 必须等于 web boot 图里的行 id，而那个 id 就是 cordis 条目名 —— 也就是
+  // 装上之后的包名。仓库根包叫 dsbot-remote、子目录包叫 dsbot-nodes，两种装法都有人用，
+  // 所以这里两个 id 都注册（图里只会用到它要的那一个，另一个的 factory 不会被执行）。
+  // 只注册一个的后果是开机卡在 "web boot: 1 entry did not activate / import failed"。
+  const ids = new Set(['dsbot-nodes', 'dsbot-remote'])
+  // 万一以后又换了个名字，从脚本 URL（…/<包名>/client.js）里再捞一个。
+  try {
+    const src = (typeof document !== 'undefined' && document.currentScript && document.currentScript.src) || ''
+    const hit = /\/([^/]+)\/client(?:[-.][^/]+)?\.js(?:[?#]|$)/.exec(src)
+    if (hit !== null && hit[1] !== '' && hit[1] !== 'assets') ids.add(decodeURIComponent(hit[1]))
+  } catch (error) {
+    // 拿不到 URL 就算了，上面两个 id 已经覆盖现在的装法。
+  }
+  const factory = (require) => {
     const React = require('react')
     const h = React.createElement
     // 宿主的组件。拿不到就整体退化成原生元素 —— 一个 require 失败不该让整页空白。
@@ -728,5 +740,6 @@ window.__ModuleLoader__.load({
         ))
       },
     }
-  },
-})
+  }
+  for (const id of ids) window.__ModuleLoader__.load({ id, factory })
+})()
