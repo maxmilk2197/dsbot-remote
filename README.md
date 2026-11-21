@@ -25,6 +25,18 @@
 - **不是**：消息转发器。群里没有"复制粘贴"这一层——`groups.js` 看到的是一条普通 Bot，`bot.model` 指向 `node:<节点id>/default`，发言内容由那台机器产生。
 - **ds-bot 只改一行**：`createRuntime` 里 `ctx.provide('bot', rt)`，把运行时挂成服务，外部插件才拿得到 `createBot` / `updateRoom` / `state.bots`。其余全部在 `dsbot-nodes` 里（推理过程见 [FORK.md](FORK.md)）。
 
+## 装插件
+
+在 DSH 的「添加插件」里粘这一行（命令行等价：`dsh plugin add` 或 `pnpm add`）：
+
+```
+https://github.com/maxmilk2197/dsbot-remote#path:/packages/dsbot-nodes
+```
+
+- `#path:/packages/dsbot-nodes` 不能省。仓库根是个 workspace 壳（`private: true`，没有 `dsh` 字段），只填仓库地址装进来的是壳，插件管理器会报"该包没有声明组合包"。
+- 这是 **git 依赖**：那台机器上得有 `git`，装之前先跑 `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。没有 git 就退回到拷目录装：`file:D:/.../dsbot-remote/packages/dsbot-nodes`（整仓库都要拷，别只拷子目录）。
+- 装完还要 ds-bot 那一行补丁，见 [FORK.md](FORK.md)；升级 ds-bot 会把它冲掉。
+
 ## 三步用起来
 
 **1. 主机拿到配对码**
