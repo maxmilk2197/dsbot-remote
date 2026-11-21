@@ -294,7 +294,8 @@ test('⑫ 名字：报上来的是 IP 就用电脑名顶掉，群里的成员也
     await ctrl.want(['g1'])
     await until(() => node.botId !== undefined)
     const bot = rt.botOf(api.list()[0].botId)
-    assert.equal(bot.name, hostname(), '群里那个成员也该叫电脑名')
+    // 远程成员统一带「远程 · 」前缀，本机同名 Bot 才不会跟它混。
+    assert.equal(bot.name, `远程 · ${hostname()}`, '群里那个成员也该叫电脑名')
   }, { name: '127.0.0.1' })
 })
 

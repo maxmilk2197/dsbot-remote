@@ -667,6 +667,19 @@
       const join = state?.join
       // 群里留着指向已删节点的 Bot：点它只会报"没有 adapter"，清理要一次点一颗。
       const strays = state?.strays || []
+      // 「主机发的消息到不了远端」：主机侧推一条都推不出去时，把卡在哪一关说出来。
+      const push = state?.push
+      const pushSkips = push === null || push === undefined ? [] : Object.entries(push.skipped || {})
+      const pushBlocked = pushSkips.filter(([reason]) => reason !== 'own')
+      const pushTrouble = push !== null && push !== undefined && push.sent === 0 && pushBlocked.length > 0
+      const reasonText = reason => ({
+        'no-record': '节点记录已删',
+        'not-allowed': '群没授权给它',
+        'not-member': '它不在这个群里',
+        closed: '连接断了',
+        own: '它自己发的',
+        'send-failed': '发送失败',
+      })[reason] ?? reason
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 } },
         // 页面标题由设置壳子统一渲染，这里不再重复一遍「远程节点」。
@@ -733,6 +746,15 @@
               note('跑起来之后这一行会自己变成绿色，不用刷新。'),
             ]),
         ]),
+
+        pushTrouble
+          ? card([
+            label('群消息推不到远端'),
+            note(`已推 ${push.sent} 条；跳过：${pushBlocked.map(([reason, count]) => `${reasonText(reason)}×${count}`).join(' · ')}`),
+            note(`最后一次：${push.lastSkip || '—'}`),
+            note('「它不在这个群里」= 那个 Bot 被移出群了，去机器那一行点「授权群组」重新拉进去。'),
+          ])
+          : null,
 
         // EasyTier 是跨网那一半的组件。以前它要么悄悄下、要么悄悄失败，
         // 界面只剩一句「正在进虚拟网…」—— 用户没法知道该等还是该点。

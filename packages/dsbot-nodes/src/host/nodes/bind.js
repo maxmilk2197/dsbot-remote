@@ -10,7 +10,7 @@
 //   1) 造一个 model 指向 node: 的 Bot
 //   2) 把这个 Bot 的 id 放进 room.members
 import { nodeIdOf, routeOf } from './adapter.js'
-import { isAddressLike } from './naming.js'
+import { hasRemotePrefix, isAddressLike, withRemotePrefix } from './naming.js'
 
 export const proxyModel = nodeId => `${routeOf(nodeId)}/default`
 
@@ -34,7 +34,8 @@ const uniqueName = (rt, wanted, exceptId) => {
  * pickModel 让 createBot 不要先挑一个本机模型，否则欢迎语会先在本机跑一轮。
  */
 export async function createProxyBot({ rt, name, role = '', avatar }) {
-  const cleanName = uniqueName(rt, name)
+  // 远程成员都带「远程 · 」前缀：本机可能就有同名 Bot，重名之后 @ 谁都认不出来。
+  const cleanName = uniqueName(rt, withRemotePrefix(name))
   const bot = await rt.createBot({
     name: cleanName,
     role: String(role ?? '').slice(0, 24),
@@ -77,6 +78,15 @@ export async function bindNodeToGroup({ rt, store, nodeId, groupId, name, role, 
       .map(id => rt.botOf(id))
       .find(bot => bot !== undefined && nodeIdOf(String(bot.model ?? '')) === nodeId)
   const bot = existing ?? twin ?? await createProxyBot({ rt, name: name ?? node.name, role, avatar })
+
+  // 升级前建的成员没有前缀：借这次绑定的机会补上（already-in-room 那条路也要走到）。
+  if (!hasRemotePrefix(bot.name)) {
+    const wanted = uniqueName(rt, withRemotePrefix(node.name), bot.id)
+    if (wanted !== bot.name) {
+      rt.warn?.('dsbot-nodes: 远程成员改名 %s → %s', bot.name, wanted)
+      bot.name = wanted
+    }
+  }
 
   bot.model = proxyModel(nodeId)
   if (cwd !== undefined && cwd !== '') bot.workDir = cwd
@@ -160,8 +170,9 @@ export async function renameProxyBot({ rt, store, nodeId, force = false }) {
   const bot = rt.botOf?.(node.botId)
   if (bot === undefined) return { renamed: false }
   // force：用户自己按了改名，名字是什么就改成什么（不再只看 IP 那种）。
-  if (!force && !isAddressLike(bot.name)) return { renamed: false }
-  const wanted = uniqueName(rt, node.name, bot.id)
+  // 没有「远程 · 」前缀的老成员也要改：重名是这次要解决的问题。
+  if (!force && !isAddressLike(bot.name) && hasRemotePrefix(bot.name)) return { renamed: false }
+  const wanted = uniqueName(rt, withRemotePrefix(node.name), bot.id)
   if (wanted === bot.name) {
     await store.update(nodeId, { botName: bot.name })
     return { renamed: false }

@@ -163,13 +163,14 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     const key = keyOf(hostRoomId)
     const entry = state.rooms[key] ?? (state.rooms[key] = { roomId: room.id, name: room.name ?? '', seq: 0 })
     let written = 0
+    let stale = 0
     for (const line of lines ?? []) {
       const text = String(line?.text ?? '')
       if (text === '') continue
       const seq = Number(line?.seq)
       const sequenced = Number.isFinite(seq) && seq > 0
       // 快照会把最后一段重发一遍：序号不比水位新的，本地已经有了。
-      if (sequenced && seq <= entry.seq) continue
+      if (sequenced && seq <= entry.seq) { stale += 1; continue }
       rt.logRoom?.(room, {
         who: line.who ?? '',
         ...(line.botId === undefined ? {} : { botId: line.botId }),
@@ -184,7 +185,8 @@ export function createMirror({ rt, warn = () => {}, home } = {}) {
     }
     await rt.save?.()
     if (written > 0) await save()
-    return { written, room }
+    // 这几个数字是排「主机发的消息没到」用的：收到几条、写进去几条、水位在哪。
+    return { written, room, received: (lines ?? []).length, stale, level: entry.seq }
   }
 
   /** 各个主机群已经收到哪儿了：握手时带给主机，让它只补缺口。 */

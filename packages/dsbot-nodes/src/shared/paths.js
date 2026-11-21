@@ -14,7 +14,7 @@
 //
 // DSBOT_NODES_HOME 可以整体搬走（测试和绿色版用）。
 import {
-  appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, renameSync, writeFileSync,
+  appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, renameSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -37,12 +37,36 @@ function legacyBotHome() {
   return process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
 }
 
+// current.log 开头的 pid：谁在写这份日志。
+function bannerPid() {
+  try {
+    const head = readFileSync(logFile(), 'utf8').slice(0, 500)
+    const hit = /\bpid=(\d+)/.exec(head)
+    return hit === null ? null : Number(hit[1])
+  } catch {
+    return null
+  }
+}
+
+const pidAlive = pid => {
+  try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'EPERM' }
+}
+
 // 每个进程只轮转一次：第一次写日志时把 current.log 挪成 previous.log，
 // 然后开一份新的 current.log。全程只有两个文件，不需要按大小切、也不留历史。
+//
+// 但"每个进程轮一次"不够：DSH 启动时还有几个短命进程会 import 插件（读清单、
+// 探 bundle），它们各自轮一遍，就把真正那次启动的日志（含 deps ready / 路由
+// 挂载）挤成 previous.log，然后再被下一个探针挤掉。所以先看 current.log 里
+// 那个 pid 还活着没有：活着就不是"上一次运行"，接着往后写。
 export function rotateLogsOnce({ force = false } = {}) {
   const state = globalThis[LOG_KEY] ?? (globalThis[LOG_KEY] = { rotated: false })
   if (state.rotated && !force) return
   state.rotated = true
+  try {
+    const owner = existsSync(logFile()) ? bannerPid() : null
+    if (!force && owner !== null && owner !== process.pid && pidAlive(owner)) return
+  } catch {}
   try {
     mkdirSync(logsDir(), { recursive: true })
     if (existsSync(logFile())) {

@@ -2,7 +2,7 @@
 // 「这台机器叫什么」的规则：用户填的 > 对方的电脑名 > IP/remote 兜底。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isAddressLike, machineNameOf, pickNodeName, shouldRename } from '../src/host/nodes/naming.js'
+import { hasRemotePrefix, isAddressLike, machineNameOf, pickNodeName, shouldRename, withRemotePrefix } from '../src/host/nodes/naming.js'
 
 test('看着像地址的名字', () => {
   for (const name of ['127.0.0.1', '192.168.3.248', 'fe80::1', '[::1]', 'remote', '', '  ', 'd-1a2b3c4d', '虚拟网 → 10.1.1.9:7777', 'tcp://10.0.0.2:7777']) {
@@ -27,6 +27,14 @@ test('名字优先级：用户填的 > 电脑名 > 兜底', () => {
   assert.equal(pickNodeName({ reported: '127.0.0.1', machine: '' }), '127.0.0.1')
   assert.equal(pickNodeName({ reported: '', machine: '' }), 'remote')
   assert.equal(pickNodeName({ reported: 'remote', machine: 'MacBook-Pro' }), 'MacBook-Pro')
+})
+
+test('远程成员的名字带「远程 · 」前缀，且不会叠两层', () => {
+  assert.equal(withRemotePrefix('PC-20261009GZBT'), '远程 · PC-20261009GZBT')
+  assert.equal(withRemotePrefix('远程 · PC-20261009GZBT'), '远程 · PC-20261009GZBT')
+  assert.equal(withRemotePrefix(''), '远程 · remote')
+  assert.equal(hasRemotePrefix('远程 · 手机'), true)
+  assert.equal(hasRemotePrefix('手机'), false)
 })
 
 test('老记录只把地址改成名字，不覆盖用户起的名', () => {

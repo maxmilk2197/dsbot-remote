@@ -36,6 +36,7 @@ function makeHostRt({ home, posted }) {
     g2: { id: 'g2', name: '写代码', members: ['chief'] },
   }
   const bots = { chief: { id: 'chief', name: 'Chief' } }
+  const listeners = new Set()
   let seq = 0
   return {
     home,
@@ -58,12 +59,21 @@ function makeHostRt({ home, posted }) {
     },
     async save() {},
     async applyModel() {},
-    onRoomLine: () => () => {},
+    onRoomLine: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    // 用户在主机群里说话：ds-bot 的 say() 就是这样通知订阅者的。
+    emitLine(id, { who = 'Chief', text, botId }) {
+      const room = rooms[id]
+      room.seq = (room.seq ?? 0) + 1
+      const record = { seq: room.seq, who, text, time: Date.now(), ...(botId === undefined ? {} : { botId }) }
+      for (const listener of listeners) listener(room, record)
+      return record
+    },
     async groupLinesAfter() { return [] },
     async postToRoom(room, bot, text) { posted.push({ group: room.id, bot: bot.id, text }) },
     teamTools: [],
     ctx: {
-      effect: () => {},
+      // 真的跑一遍：主机把 onRoomLine 的订阅放在 effect 里。
+      effect: fn => fn(),
       llm: {
         registerAdapter() {
           const registration = () => {}
@@ -90,6 +100,8 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
   assert.ok(hosted.port > 0, '主机得先在某个端口上等')
 
   const peer = await connectTcp({ url: `tcp://127.0.0.1:${hosted.port}`, token: hosted.code })
+  // 加入端收到的群消息：主机推过来的那一半靠它验。
+  const got = []
   let ctrl
   try {
     // 加入端：主文件夹是它自己选的，握手时点名要进 g1。
@@ -103,6 +115,7 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
         // 配了 agent 才有资格进群（没配的会被 bind 直接挡住）。
         agent: { command: 'node', args: ['-e', ''] },
         inbox: false,
+        onGroupLine: (params, lines) => { got.push({ params, lines }) },
         onHostInfo: (value) => { clearTimeout(timer); resolve(value) },
       })
     })
@@ -164,6 +177,16 @@ test('远程主机实验：工作区 / 选群回执 / node.wants / 直接发言�
     const escape = await api.call(node.id, 'node.exec', { execId: 'fs-4', action: 'list_dir', args: { cwd: '..', path: '.' } })
     assert.equal(escape.ok, false)
     assert.equal(escape.code, 'node/exec-denied')
+
+    // 8) 主机 → 加入端：主机群里有人说了一句，得从这条 TCP 推过去。
+    //    以前这段没有任何测试，单向不通时只能靠猜。
+    rt.emitLine('g1', { who: 'Chief', text: '主机这边的回声' })
+    // 握手时会先来一帧空的 snapshot，所以按文字找，不看"收到任意一帧"。
+    const hitOf = () => got.find(entry => (entry.lines ?? []).some(line => line.text === '主机这边的回声'))
+    await until(() => hitOf() !== undefined)
+    const hit = hitOf()
+    assert.equal(hit.params.room.id, 'g1')
+    assert.ok(hit.params.cursor >= 1, '带上水位，加入端才知道断线后从哪补')
   } finally {
     peer.close()
     await api.hosting.stop?.()

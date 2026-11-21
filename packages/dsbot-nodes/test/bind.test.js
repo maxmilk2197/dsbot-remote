@@ -92,7 +92,8 @@ test('绑进群：模型是 node:id/default，成员里有它，节点记下群�
     const result = await bindNodeToGroup({ rt, store, nodeId: node.id, groupId: 'g1', name: '写代码那台' })
 
     assert.equal(result.created, true)
-    assert.equal(result.botName, '写代码那台')
+    // 远程成员带「远程 · 」前缀：本机同名 Bot 才不会被 @ 混。
+    assert.equal(result.botName, '远程 · 写代码那台')
     assert.equal(state.bots[result.botId].model, proxyModel(node.id))
     assert.equal(state.bots[result.botId].model, `node:${node.id}/default`)
     assert.equal(state.bots[result.botId].kickoff, undefined)
@@ -148,12 +149,12 @@ test('名字撞了：自动加序号，不让群里出现两个能 @ 到的人',
   await withStore(async (store) => {
     const { rt, state } = fakeTeam({
       rooms: [{ id: 'g1', name: '赚钱小组', members: [] }],
-      bots: [{ id: 'bot-0', name: '写代码那台' }],
+      bots: [{ id: 'bot-0', name: '远程 · 写代码那台' }],
     })
     const node = await store.add({ name: '写代码那台', deviceId: 'd-1' })
     const result = await bindNodeToGroup({ rt, store, nodeId: node.id, groupId: 'g1' })
-    assert.equal(result.botName, '写代码那台 2')
-    assert.equal(state.bots[result.botId].name, '写代码那台 2')
+    assert.equal(result.botName, '远程 · 写代码那台 2')
+    assert.equal(state.bots[result.botId].name, '远程 · 写代码那台 2')
   })
 })
 

@@ -775,22 +775,29 @@ ${links.join(' ')}`
     ctx.effect(() => rt.onRoomLine((room, record) => {
       const line = lineOf(record)
       if (line.text === '') return
+      const roomName = room.name || room.id
       for (const [nodeId, peer] of peers) {
         const node = store.node(nodeId)
+        if (node === undefined) { notePushSkip('no-record', nodeId, `群「${roomName}」`); continue }
         // 授权被收回的群，一条消息都不再推给它。
-        if (node === undefined || !isAllowedIn(node, room.id)) continue
+        if (!isAllowedIn(node, room.id)) { notePushSkip('not-allowed', nodeId, `群「${roomName}」`); continue }
         // 授权还在、但成员已经被从群里删掉：同样不该再看到群里的新消息。
-        if (node.botId !== undefined && !(room.members ?? []).includes(node.botId)) continue
-        if (peer.closed === true) continue
+        if (node.botId !== undefined && !(room.members ?? []).includes(node.botId)) {
+          notePushSkip('not-member', nodeId, `群「${roomName}」少 ${node.botId}`)
+          continue
+        }
+        if (peer.closed === true) { notePushSkip('closed', nodeId); continue }
         // 它自己刚说的话不用推回去（它当场就打印过了），免得每条都出现两遍。
-        if (line.botId !== undefined && line.botId === node.botId) continue
+        if (line.botId !== undefined && line.botId === node.botId) { notePushSkip('own', nodeId); continue }
         try {
           // 协议里 room 是对象、cursor 是必填：两个老字段留着兼容旧节点，新的补齐。
           peer.send({
             method: 'group.line',
-            params: { room: { id: room.id, name: room.name || room.id }, roomId: room.id, roomName: room.name, cursor: line.seq, hostId: HOST_ID, lines: [line] },
+            params: { room: { id: room.id, name: roomName }, roomId: room.id, roomName: room.name, cursor: line.seq, hostId: HOST_ID, lines: [line] },
           })
+          notePushSent(nodeId, node, line.text)
         } catch (error) {
+          notePushSkip('send-failed', nodeId, String(error?.message ?? error))
           warn('dsbot-nodes: 推群消息给 %s 失败：%s', nodeId, error?.message ?? error)
         }
       }
@@ -1081,9 +1088,42 @@ const ROUTE_KEY = Symbol.for('dsbot-nodes.routes/v1')
 
 function routeState() {
   if (globalThis[ROUTE_KEY] === undefined) {
-    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null, server: null, early: null }
+    globalThis[ROUTE_KEY] = { mounted: false, unregister: null, current: null, server: null, early: null, push: null }
   }
   return globalThis[ROUTE_KEY]
+}
+
+// 「主机发的消息没到远端」这种问题，以前日志里一个字都没有：推送循环里每一处
+// 跳过都是 continue。现在把计数和第一次跳过的原因留下来，/status 直接能看到。
+function pushStats() {
+  const routes = routeState()
+  if (routes.push === null || routes.push === undefined) {
+    routes.push = { sent: 0, skipped: {}, last: '', lastAt: 0, lastSkip: '', notes: new Set() }
+  }
+  return routes.push
+}
+
+function notePushSkip(reason, nodeId, extra) {
+  const stats = pushStats()
+  stats.skipped[reason] = (stats.skipped[reason] ?? 0) + 1
+  const detail = extra === undefined || extra === '' ? '' : `（${extra}）`
+  stats.lastSkip = `${reason} node=${nodeId}${detail}`
+  const notes = stats.notes ?? (stats.notes = new Set())
+  const key = `skip|${reason}|${nodeId}`
+  if (notes.has(key)) return
+  notes.add(key)
+  appendLog(`${new Date().toISOString()} push skip ${reason} node=${nodeId}${detail}`)
+}
+
+function notePushSent(nodeId, node, text) {
+  const stats = pushStats()
+  stats.sent += 1
+  stats.lastAt = Date.now()
+  stats.last = `${nodeId}: ${text.slice(0, 40)}`
+  const notes = stats.notes ?? (stats.notes = new Set())
+  if (notes.has('sent')) return
+  notes.add('sent')
+  appendLog(`${new Date().toISOString()} push 第一条推成功 ${node?.name ?? nodeId}：${text.slice(0, 40)}`)
 }
 
 // 设置页是本机页面，但路由挂在 DSH 的 web server 上：任何网页都能对着
@@ -1223,6 +1263,11 @@ function registerRoutes(rt, api, hosting) {
           groups: listGroups(rt),
           join: api.joinStatus(),
           strays: straysOf(),
+          // 「主机发的消息到不了远端」先看这里：成功几条、卡在哪一关。
+          push: (() => {
+            const stats = pushStats()
+            return { sent: stats.sent, skipped: { ...stats.skipped }, lastAt: stats.lastAt, last: stats.last, lastSkip: stats.lastSkip }
+          })(),
         })
       }
       // 清掉一个孤儿成员：移出它所在的群，再删掉那个 Bot。

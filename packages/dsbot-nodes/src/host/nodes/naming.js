@@ -41,6 +41,21 @@ export function pickNodeName({ reported, machine } = {}) {
   return 'remote'
 }
 
+
+// 远程成员一律带「远程 · 」前缀：本机可能就有同名 Bot，群里 @ 人靠名字认，
+// 撞名之后谁都分不清哪个是自己的、哪个在别人电脑上跑。
+export const REMOTE_PREFIX = '远程 · '
+
+/** 幂等：已经带前缀的不再叠一层。 */
+export function withRemotePrefix(name) {
+  const text = String(name ?? '').trim().slice(0, 64) || 'remote'
+  return text.startsWith(REMOTE_PREFIX) ? text : `${REMOTE_PREFIX}${text}`
+}
+
+export function hasRemotePrefix(name) {
+  return String(name ?? '').trim().startsWith(REMOTE_PREFIX)
+}
+
 /** 老记录（名字还是 127.0.0.1 / remote）要不要按新报上来的名字改。 */
 export function shouldRename(current, next) {
   const now = String(current ?? '').trim()

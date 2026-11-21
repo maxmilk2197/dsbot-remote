@@ -12,6 +12,7 @@ import net from 'node:net'
 import { hostname } from 'node:os'
 import { addPortForward, findEasyTier, instancePorts, pairCredentials, startEasyTier, waitForHostPeer } from '../../node/easytier.js'
 import { createMirror } from './mirror.js'
+import { appendLog } from '../../shared/paths.js'
 
 // 端口转发要在本机开一个真实端口，挑一个没人用的。
 const freePort = () => new Promise((resolve, reject) => {
@@ -138,7 +139,15 @@ export function createJoiner({ home, rt, llm, warn = () => {} }) {
         // 握手时带上"每个群已经收到哪儿"，主机只补缺口。
         cursors: () => mirror.cursors(),
         onGroupLine: (params, lines) => {
-          void mirror.write(params, lines).catch(error => warn(`镜像群写入失败：${error.message}`))
+          const roomName = params?.roomName ?? params?.room?.name ?? params?.roomId ?? '?'
+          void mirror.write(params, lines)
+            .then(result => {
+              appendLog(`${new Date().toISOString()} 群消息 ${lines?.length ?? 0} 条（「${roomName}」）→ 写入 ${result?.written ?? 0}${result?.stale ? `，重复跳过 ${result.stale}` : ''}，水位 ${result?.level ?? 0}`)
+            })
+            .catch(error => {
+              appendLog(`${new Date().toISOString()} 镜像群写入失败（「${roomName}」）：${error?.stack ?? error}`)
+              warn(`镜像群写入失败：${error.message}`)
+            })
         },
         // 连上就把对方给的那些群在本地建出来，不用等第一条消息。
         onGroups: (groups) => {

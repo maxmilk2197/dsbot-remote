@@ -92,6 +92,10 @@ test('状态口在真 HTTP 上能读', async () => {
     assert.equal(plain.body.ok, true)
     // 孤儿成员那张表永远在：界面靠它给"移出群"的按钮，缺字段等于那张卡永远不出现。
     assert.ok(Array.isArray(plain.body.strays))
+    // 推送统计也永远在：「主机发的消息没到远端」先看这几个数字。
+    assert.equal(typeof plain.body.push, 'object')
+    assert.equal(typeof plain.body.push.sent, 'number')
+    assert.equal(typeof plain.body.push.skipped, 'object')
   })
 })
 
