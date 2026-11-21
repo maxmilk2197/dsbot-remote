@@ -116,6 +116,18 @@ pnpm patch-commit .tmp-patch-ds-bot      # 会更新 pnpm-workspace.yaml + patch
 
 插件侧也加了兜底：装不上 45 秒后会往日志写一句「等不到 bot 服务」，指明是这行补丁。
 
+### 插件会自己把这一行补回来（不需要人改 node_modules）
+
+`packages/dsbot-nodes/src/host/nodes/selfpatch.js` 在每次 `apply` 一开始做三件事：
+
+1. 用 `createRequire(import.meta.url).resolve('ds-bot')` 找到**这台机器上真正被加载的那个包**（不是猜目录）；
+2. 在包根扫 `.js`（跳过 >400 KB 的浏览器包），找含 `adoptLiveWork` 的文件 —— 那才是装着 `createRuntime` 的实现（0.3.8 是 `index.js`，`plugin.js` 只是一层 `import` 壳）；
+3. 已经有 `provide('bot'` 就只记一句「已在位」；没有就把锚点行替换成锚点 + `ctx.provide('bot', rt)`，先备份成 `*.bak-dsbot-provide`。
+
+日志里对应 `ds-bot vX 自补：已写上 …（重启 DSH 生效）` 或 `自补：已在位`。写的是**下次启动读到的源码**：如果本次启动里 ds-bot 已经 import 过了，重启一次 DSH 才生效 —— 这是这条自补唯一的代价，不用人动手。`DSBOT_NODES_SELFPATCH=0` 可关掉。
+
+pnpm 补丁（上一节）仍然保留：它让 `pnpm install` 之后立刻就是对的；自补负责兜住"补丁对不上版本"和"手动更新冲掉补丁"这两种情况。
+
 ## 从 GitHub 装：线协议为什么并进了插件
 
 这个插件要能"粘仓库地址就装"（`…/dsbot-remote#path:/packages/dsbot-nodes`）。

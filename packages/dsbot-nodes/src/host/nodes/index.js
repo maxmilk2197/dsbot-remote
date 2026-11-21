@@ -50,6 +50,7 @@ import { connectTcp } from '../../protocol/transport/tcp.js'
 import { directionAllows, methodOf } from '../../protocol/methods.js'
 import { validateFields } from '../../protocol/validate.js'
 import { claimInstance, guardStats, newModuleId, releaseInstance, resetGuard } from './guard.js'
+import { ensureDsbotProvide, inspectDsbot } from './selfpatch.js'
 import { appendLog, dataHome, logFile, migrateLegacyData } from '../../shared/paths.js'
 
 export const name = 'dsbot-nodes'
@@ -94,30 +95,21 @@ bootNote('module imported')
 // 热重载换掉整个模块 → 先拆旧实例再装新的，绝不让两个 7777 监听并存。
 // 模块级变量做不到这件事：热重载会把它连同整个模块换掉，而旧实例开的端口还在。
 const MODULE_ID = newModuleId()
+// 自补结果，供 45 秒超时和早期状态口引用（都是"为什么还没起来"的解释材料）。
+let selfpatchNote = ''
 bootNote(`module loaded (${MODULE_ID})`)
 
 // "等不到 bot 服务"这条线上最费时间的问题：日志只说明缺补丁，却不说**哪份**
 // ds-bot 被加载、它到底有没有那一行。profile 里装过好几个版本、升级留下老目录时，
 // 用户照着文档补了 A，跑起来的却是 B。这里在启动时就把答案写进日志。
 function describeDsbot() {
-  try {
-    const req = createRequire(import.meta.url)
-    const entry = req.resolve('ds-bot')
-    let version = 'unknown'
-    for (const guess of ['ds-bot/package.json', join(dirname(entry), 'package.json')]) {
-      try { version = JSON.parse(readFileSync(req.resolve(guess), 'utf8')).version ?? version; break } catch {}
-    }
-    let patched
-    try {
-      const source = readFileSync(entry, 'utf8')
-      patched = /provide\(\s*['"]bot['"]/.test(source) ? "有 ctx.provide('bot')" : "缺 ctx.provide('bot', rt)"
-    } catch (error) {
-      patched = `读不到入口（${error?.message ?? error}）`
-    }
-    return { version, entry, patched, short: `ds-bot v${version} ${patched}`, text: `ds-bot v${version} ${patched} · ${entry}` }
-  } catch (error) {
+  let entry = ''
+  try { entry = createRequire(import.meta.url).resolve('ds-bot') } catch (error) {
     return { version: 'unknown', entry: '', patched: '解析不到', short: 'ds-bot 解析不到', text: `ds-bot 解析不到：${error?.message ?? error}` }
   }
+  const info = inspectDsbot()
+  const patched = info.patched ? "有 ctx.provide('bot')" : "缺 ctx.provide('bot', rt)"
+  return { version: info.version, entry, patched, short: `ds-bot v${info.version} ${patched}`, text: info.text }
 }
 
 export function install(rt) {
@@ -1142,6 +1134,8 @@ function registerRoutes(rt, api, hosting) {
   routeState().current = { rt, api, hosting }
 
   const handler = async (req, res) => {
+    // 早期占位 handler 靠这个字段把请求转交过来（同一个前缀只能挂一份）。
+    routeState().handler = handler
     const current = routeState().current
     if (current === null) return sendJson(res, 503, { ok: false, error: '插件还没就绪' })
     const { rt, api, hosting } = current
@@ -1362,9 +1356,17 @@ function registerRoutes(rt, api, hosting) {
     // 一起走了，只剩一个 mounted=true 的错觉，设置页从此永远 404。
     if (routes.mounted && routes.server === server) return
     // 早期那个"还没挂载"的占位路由得先让位，否则同一个前缀会撞 duplicate。
-    if (routes.early?.server === server) {
-      try { routes.early.unregister?.() } catch {}
+    //
+    // 不能按 server 对象身份判断：早期路由是从 ctx.root.webServer 拿到的，mount 这次
+    // 从别的 context 拿，包装对象未必同一个（真机上就出现过），判断不成立就一直让
+    // 占位 handler 抢答 pending —— 页面永远"设置页还没挂上"。一律释放。
+    if (routes.early !== null && routes.early !== undefined) {
+      const early = routes.early
       routes.early = null
+      try { early.unregister?.() } catch (error) {
+        bootNote(`释放早期路由失败（${error?.message ?? error}），正式路由可能撞 duplicate`)
+      }
+      bootNote('early route released（正式路由要上来了）')
     }
     if (routes.mounted) {
       try { routes.unregister?.() } catch {}
@@ -1380,23 +1382,30 @@ function registerRoutes(rt, api, hosting) {
     } catch (error) {
       const message = String(error?.message ?? error)
       if (/duplicate prefix/i.test(message)) {
-        // 旧版本实例的路由还占着这个前缀。不重复挂，也不装作挂上了。
-        routes.mounted = true
-        routes.server = server
-        rt.warn?.('dsbot-nodes: 路由被旧实例占用，这次不重复挂；重启 DSH 后恢复')
+        // 旧版本实例（或没释放掉的占位路由）还占着这个前缀。占位 handler 已经
+        // 被上面释放过了；如果还撞，说明是别的实例，只能等它自己挂或者重启。
+        bootNote('routes duplicate：/api/nodes 被另一个实例占着，这次没挂上（重启 DSH 可恢复）')
         return
       }
       rt.warn?.(`dsbot-nodes: 设置页接口没挂上（${message}），不影响跨网和群功能`)
     }
   }
-  const ready = ctx.get?.('webServer') ?? ctx.webServer
+  // ctx.get 在这个上下文里会抛 "cannot get property without inject"（真机日志见过），
+  // 直接取会把整个挂载跳过 —— 用和早期路由同一条探测链。
+  const found = findWebServer(ctx)
+  for (const note of found.notes) bootNote(`mount: ${note}`)
+  const ready = found.server
   if (ready?.register !== undefined) {
     mount(ready)
     return
   }
   if (typeof ctx.inject === 'function') {
     try {
-      ctx.inject(['webServer'], sub => mount(sub.get?.('webServer') ?? sub.webServer))
+      ctx.inject(['webServer'], (sub) => {
+        const injected = findWebServer(sub)
+        for (const note of injected.notes) bootNote(`mount(inject): ${note}`)
+        mount(injected.server)
+      })
       return
     } catch {
       /* 退到下面 */
@@ -1618,6 +1627,10 @@ function applyPlugin(ctx, config = {}) {
   // 搬过什么、搬到哪都写一行 —— 记录丢了就得挨个重新配对，不能静默。
   try { migrateLegacyData(bootNote) } catch (error) { bootNote(`migrate 失败: ${error?.message ?? error}`) }
   bootNote('migrate done')
+  // 每台机器都要有那一行；升级会冲掉。自动补回去，别让用户手工改 node_modules。
+  const selfpatch = ensureDsbotProvide()
+  selfpatchNote = selfpatch.text
+  bootNote(selfpatch.text)
   if (isDisabled()) {
     bootNote('disabled by nodes-off')
     return
@@ -1676,6 +1689,10 @@ function applyPlugin(ctx, config = {}) {
     try { routes.early?.unregister?.() } catch {}
     routes.early = null
     const handler = async (req, res) => {
+      // 正式路由一旦挂上，占位 handler 立刻让路。万一释放没成功（duplicate），
+      // 也不会拿 pending 的假状态一直糊住页面。
+      const live = routeState()
+      if (live.mounted && typeof live.handler === 'function') return live.handler(req, res)
       const url = new URL(req.url, 'http://localhost')
       const path = url.pathname.replace(/\/+$/, '')
       const crossSite = crossSiteReason(req)
@@ -1699,7 +1716,8 @@ function applyPlugin(ctx, config = {}) {
           pending: true,
           reason: depsReady
             ? '正在挂载，几秒后再刷新'
-            : "还没等到 bot 服务：ds-bot 缺 ctx.provide('bot', rt) 这一行补丁（升级 ds-bot 会冲掉）。"
+            : "还没等到 bot 服务：ds-bot 少了 ctx.provide('bot', rt) 这一行。"
+              + (selfpatchNote === '' ? '' : `${selfpatchNote}。`)
               + `实际加载的那份：${describeDsbot().text}`,
           hosting: false,
           code: null,
@@ -1750,10 +1768,10 @@ function applyPlugin(ctx, config = {}) {
     const timer = setTimeout(() => {
       if (depsReady) return
       const dsbot = describeDsbot()
-      bootNote('等不到 bot 服务：ds-bot 需要 ctx.provide(\'bot\', rt) 这一行补丁，'
-        + '升级 ds-bot 后要重新应用（pnpm.patchedDependencies → patches/ds-bot@*.patch）。'
+      bootNote('等不到 bot 服务：ds-bot 少了 ctx.provide(\'bot\', rt) 这一行，插件拿不到运行时。'
+        + (selfpatchNote === '' ? '' : `本次自补：${selfpatchNote}。`)
         + `实际加载的那份：${dsbot.text}`
-        + '。远程节点功能不可用，DSH 其余部分不受影响')
+        + '。若刚写补丁，重启一次 DSH 就生效；远程节点暂不可用，DSH 其余部分不受影响')
     }, ms)
     timer.unref?.()
     return timer

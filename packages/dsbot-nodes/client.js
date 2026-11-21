@@ -650,7 +650,7 @@
                 children: busy === 'mount' ? '正在挂载…' : '立即挂载',
                 onClick: () => act('mount', () => jpost('/mount')),
               }),
-              note('只是再催一次；日志里说缺补丁，就得先补那一行'),
+              note('补丁会自动打；刚打完要重启一次 DSH 才读得到'),
             ]),
           ])
           : null,

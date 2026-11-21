@@ -23,7 +23,7 @@
 
 - **是**：一台机器上的 Bot 加入**主机已有的群**，用那台机器的算力发言；主机可以通过白名单动作在它上面读文件、列目录、跑命令、写文件。
 - **不是**：消息转发器。群里没有"复制粘贴"这一层——`groups.js` 看到的是一条普通 Bot，`bot.model` 指向 `node:<节点id>/default`，发言内容由那台机器产生。
-- **ds-bot 只改一行**：`createRuntime` 里 `ctx.provide('bot', rt)`，把运行时挂成服务，外部插件才拿得到 `createBot` / `updateRoom` / `state.bots`。其余全部在 `dsbot-nodes` 里（推理过程见 [FORK.md](FORK.md)）。
+- **ds-bot 只改一行**：`createRuntime` 里 `ctx.provide('bot', rt)`，把运行时挂成服务，外部插件才拿得到 `createBot` / `updateRoom` / `state.bots`。**这一行由插件启动时自己补**（升级 ds-bot 冲掉也会补回，见 [FORK.md](FORK.md)），装的人不用改 node_modules。其余全部在 `dsbot-nodes` 里。
 
 ## 装插件
 
