@@ -28,6 +28,13 @@ test('ChatBox 用 h(ChatBox, {...}) 渲染', () => {
   assert.match(source, /h\(ChatBox, \{ join, act \}\)/)
 })
 
+// 404 只说明"路由没挂上"，得直接指向真正的原因和要看的日志。
+test('404 时给出可执行的解释', () => {
+  assert.match(source, /const statusErrorText = /)
+  assert.match(source, /setError\(statusErrorText\(e\)\)/)
+  assert.match(source, /等不到 bot 服务/)
+})
+
 // 缺 EasyTier 时得给一个「下载 / 重试」，不能只留一句静态的「正在进虚拟网…」。
 test('EasyTier 没准备好时给出下载 / 重试入口', () => {
   assert.match(source, /const et = state\?\.easytier/)

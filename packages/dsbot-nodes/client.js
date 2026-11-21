@@ -523,6 +523,17 @@
       ], { gap: 10 })
     }
 
+    // 404 不是"插件坏了"，是路由压根没挂上。两种原因都得说出来：
+    // 宿主的 ctx.provide('bot', rt) 被升级冲掉了，或者刚启动还没到挂载时间。
+    // 只给一句 HTTP 404，用户只能对着页面猜。
+    const statusErrorText = (error) => {
+      const message = error?.message ?? String(error)
+      if (!/HTTP 404/.test(message)) return '读不到状态：' + message
+      return '读不到状态：HTTP 404 —— 路由还没挂上。宿主 ds-bot 缺 ctx.provide(\'bot\', rt) '
+        + '这一行补丁（升级 ds-bot 会冲掉），或刚启动还没到挂载时间（约 20 秒）。'
+        + '看 ~/.dsh/bot/nodes-boot.log：末尾有「等不到 bot 服务」就是补丁没了。'
+    }
+
     function Panel() {
       const [state, setState] = React.useState(null)
       const [groups, setGroups] = React.useState([])
@@ -545,7 +556,7 @@
           setGroups(status.groups || [])
           setError('')
         } catch (e) {
-          setError('读不到状态：' + e.message)
+          setError(statusErrorText(e))
         }
       }, [])
 

@@ -34,7 +34,7 @@ try {
   defineTool = definition => definition
 }
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -63,11 +63,21 @@ function botHome() {
   return process.env.DSH_HOME ? join(process.env.DSH_HOME, 'bot') : join(homedir(), '.dsh', 'bot')
 }
 
+// 日志每行都带版本号：用户贴一段 tail 过来，第一件要确认的事就是"你装的是哪一版"。
+// 读包自己的 package.json —— 装成仓库根包或子目录包时，两处版本号是同步的。
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).version || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
 function bootNote(text) {
   try {
     const base = botHome()
     mkdirSync(base, { recursive: true })
-    appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} ${text}
+    appendFileSync(join(base, 'nodes-boot.log'), `${new Date().toISOString()} ${text} · v${VERSION}
 `)
   } catch {}
 }

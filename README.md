@@ -42,11 +42,11 @@ https://github.com/maxmilk2197/dsbot-remote
   一样是「输入框里贴一行」：
 
   ```
-  https://raw.githubusercontent.com/maxmilk2197/dsbot-remote/main/dist/dsbot-remote-0.1.2.tgz
+  https://raw.githubusercontent.com/maxmilk2197/dsbot-remote/main/dist/dsbot-remote-0.1.3.tgz
   ```
 
   大陆网络 raw 不通时换 CDN 镜像：
-  `https://cdn.jsdelivr.net/gh/maxmilk2197/dsbot-remote@main/dist/dsbot-remote-0.1.2.tgz`。
+  `https://cdn.jsdelivr.net/gh/maxmilk2197/dsbot-remote@main/dist/dsbot-remote-0.1.3.tgz`。
   两条都实测过：`pnpm add` 2 秒装完，入口、`dsh.bundle.patch` 都在。
 - 上面那条 git 地址要求机器上有 `git`，装之前先跑
   `git ls-remote https://github.com/maxmilk2197/dsbot-remote` 确认能通。
